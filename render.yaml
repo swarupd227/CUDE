@@ -1,0 +1,18 @@
+# render.yaml — deploy to Render.com (https://render.com)
+
+services:
+  - type: web
+    name: cude-platform
+    env: node
+    region: oregon
+    plan: free              # or starter/standard for production
+    buildCommand: node build.js
+    startCommand: cd backend && node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+      - key: ANTHROPIC_API_KEY
+        sync: false         # Set manually in Render dashboard (never commit API keys)

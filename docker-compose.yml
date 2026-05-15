@@ -1,0 +1,193 @@
+services:
+  # ── PostgreSQL 16 with pgvector extension ──────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: cude-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: cude
+      POSTGRES_USER: cude
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cude_dev_pass}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cude"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Redis 7 — Job queue (BullMQ) + cache + SSE pub/sub ────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: cude-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── MinIO — S3-compatible object store ─────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: cude-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-cude-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-cude-secret-key-change-me}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── Elasticsearch 8 — Full-text search + faceted filtering ─────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: cude-elasticsearch
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Neo4j 5 — Knowledge graph for asset relationships ──────────────────────
+  neo4j:
+    image: neo4j:5-community
+    container_name: cude-neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-cude_graph_pass}
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+
+  # ── CUDE API Server ────────────────────────────────────────────────────────
+  cude-api:
+    build: .
+    image: cude-platform:latest
+    container_name: cude-api
+    ports:
+      - "0.0.0.0:3001:3001"
+    volumes:
+      - /c/Test:/data/scan/Test:ro
+      - /c/Users/swarupd/Downloads:/data/scan/Downloads:ro
+      - /c/Users/swarupd/Documents:/data/scan/Documents:ro
+      - /c/Users/swarupd/Desktop:/data/scan/Desktop:ro
+    env_file:
+      - .env
+    environment:
+      - PORT=3001
+      - HOST=0.0.0.0
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://cude:${POSTGRES_PASSWORD:-cude_dev_pass}@postgres:5432/cude
+      - REDIS_URL=redis://redis:6379
+      - MINIO_ENDPOINT=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-cude-admin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-cude-secret-key-change-me}
+      - MINIO_USE_SSL=false
+      - JWT_SECRET=${JWT_SECRET:-cude-jwt-dev-secret-change-in-production}
+      - JWT_EXPIRES_IN=24h
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - NEO4J_URL=bolt://neo4j:7687
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-cude_graph_pass}
+      - USE_DATABASE=${USE_DATABASE:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Python Parser Worker — enhanced PDF/PPTX parsing (optional) ──────────────
+  # Uncomment below to enable. Requires pulling python:3.11-slim from Docker Hub.
+  # parser-worker:
+  #   build: ./parser-worker
+  #   container_name: cude-parser-worker
+  #   environment:
+  #     - REDIS_URL=redis://redis:6379
+  #   volumes:
+  #     - /c/Test:/data/scan/Test:ro
+  #     - /c/Users/swarupd/Downloads:/data/scan/Downloads:ro
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+
+  # ── MySQL 8 — AdventureWorks Demo Database ──────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: cude-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_pass}
+      MYSQL_DATABASE: adventureworks
+      MYSQL_USER: cude
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-cude_demo_pass}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/mysql-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  redis_data:
+  minio_data:
+  es_data:
+  neo4j_data:
+  mysql_data:
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Start:
+#   docker-compose up --build
+#   Open http://localhost:3001 or http://YOUR_IP:3001
+#
+# Accessible to others on the network via your IP address on port 3001
+# ──────────────────────────────────────────────────────────────────────────────
