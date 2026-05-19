@@ -1,11 +1,11 @@
 const { query, transaction } = require('../pool');
 
-async function create(code, name, description, ownerId, sensitivityCeiling = 'TRADE_SECRET') {
+async function create(code, name, description, ownerId, sensitivityCeiling = 'TRADE_SECRET', industryTemplate = null) {
   return transaction(async (client) => {
     const result = await client.query(
-      `INSERT INTO projects (code, name, description, owner_id, sensitivity_ceiling)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [code, name, description, ownerId, sensitivityCeiling]
+      `INSERT INTO projects (code, name, description, owner_id, sensitivity_ceiling, industry_template)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [code, name, description, ownerId, sensitivityCeiling, industryTemplate]
     );
     const project = result.rows[0];
     // Auto-add owner as project member
@@ -44,7 +44,7 @@ async function findAll(userId = null) {
 }
 
 async function update(id, patch) {
-  const fields = Object.keys(patch).filter(k => ['name','description','sensitivity_ceiling','status','settings'].includes(k));
+  const fields = Object.keys(patch).filter(k => ['name','description','sensitivity_ceiling','status','settings','industry_template'].includes(k));
   if (!fields.length) return findById(id);
   const sets = fields.map((f, i) => `${f} = $${i + 2}`).join(', ');
   const values = fields.map(f => typeof patch[f] === 'object' ? JSON.stringify(patch[f]) : patch[f]);

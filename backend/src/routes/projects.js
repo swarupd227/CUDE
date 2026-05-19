@@ -44,25 +44,41 @@ router.get('/:id', requireAuth, async (req, res) => {
 // ── Create project ───────────────────────────────────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
   try {
-    const { code, name, description, sensitivity_ceiling } = req.body;
+    const { code, name, description, sensitivity_ceiling, industry_template } = req.body;
     if (!code || !name) return res.status(400).json({ error: 'Project code and name are required' });
 
     // Check code uniqueness
     const existing = await projectRepo.findByCode(code);
     if (existing) return res.status(409).json({ error: `Project code "${code}" already exists` });
 
-    const project = await projectRepo.create(code, name, description, req.user.id, sensitivity_ceiling || 'TRADE_SECRET');
+    const project = await projectRepo.create(
+      code, name, description, req.user.id,
+      sensitivity_ceiling || 'TRADE_SECRET',
+      industry_template || null
+    );
+
+    // Auto-apply ontology template for the selected industry — so the project
+    // starts with a meaningful schema instead of empty/defaults.
+    let templateApplied = null;
+    if (industry_template) {
+      try {
+        const { applyTemplateToOntology } = require('../services/ontologyTemplateService');
+        templateApplied = await applyTemplateToOntology(industry_template);
+      } catch (e) {
+        console.log('⚠️  Ontology template auto-apply failed:', e.message);
+      }
+    }
 
     // Audit
     try {
       await auditRepo.write({
         project_id: project.id, actor_type: 'USER', actor_id: req.user.email,
         action: 'project.created', entity_type: 'project', entity_id: project.id,
-        after_state: { code, name, sensitivity_ceiling: sensitivity_ceiling || 'TRADE_SECRET' },
+        after_state: { code, name, sensitivity_ceiling: sensitivity_ceiling || 'TRADE_SECRET', industry_template, template_applied: templateApplied },
       });
     } catch (_) {}
 
-    res.status(201).json({ project });
+    res.status(201).json({ project, template_applied: templateApplied });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

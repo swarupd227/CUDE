@@ -8,9 +8,16 @@ import { useNavigate } from 'react-router-dom';
 const CEILINGS = ['PUBLIC','INTERNAL','CONFIDENTIAL','RESTRICTED','TRADE_SECRET'];
 
 function CreateProjectModal({ onClose, onCreated }) {
-  const [form, setForm] = useState({ code:'', name:'', description:'', sensitivity_ceiling:'TRADE_SECRET' });
+  const [form, setForm] = useState({ code:'', name:'', description:'', sensitivity_ceiling:'TRADE_SECRET', industry_template:'' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [templates, setTemplates] = useState([]);
+
+  useEffect(() => {
+    fetch(`${API}/ontology/templates`).then(r => r.json())
+      .then(d => setTemplates(d.templates || []))
+      .catch(() => {});
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -20,7 +27,7 @@ function CreateProjectModal({ onClose, onCreated }) {
       const token = localStorage.getItem('cude_token');
       const r = await fetch(`${API}/projects`, {
         method:'POST', headers:{'Content-Type':'application/json', ...(token ? {Authorization:`Bearer ${token}`} : {})},
-        body: JSON.stringify(form)
+        body: JSON.stringify({ ...form, industry_template: form.industry_template || null })
       }).then(r => r.json());
       if (r.error) throw new Error(r.error);
       onCreated?.(r.project);
@@ -29,11 +36,13 @@ function CreateProjectModal({ onClose, onCreated }) {
     setSaving(false);
   };
 
+  const selectedTemplate = templates.find(t => t.key === form.industry_template);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg m-4" onClick={e => e.stopPropagation()}>
-        <div className="p-5 border-b border-slate-800 flex items-center justify-between">
-          <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2"><Plus size={18} className="text-blue-400"/>Create New Project</h2>
+      <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-2xl m-4 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="p-5 border-b border-slate-800 flex items-center justify-between sticky top-0 bg-slate-900 z-10">
+          <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2"><Plus size={18} className="text-slate-400"/>Create New Project</h2>
           <button onClick={onClose} className="text-slate-500 hover:text-slate-300"><X size={18}/></button>
         </div>
         <form onSubmit={handleSubmit} className="p-5 space-y-4">
@@ -54,12 +63,50 @@ function CreateProjectModal({ onClose, onCreated }) {
             <textarea className="input w-full h-16 resize-none" placeholder="What does this project govern?"
               value={form.description} onChange={e => setForm(f=>({...f, description:e.target.value}))}/>
           </div>
+
+          {/* Industry template picker — auto-applies the matching ontology */}
+          <div>
+            <div className="text-xs text-slate-400 mb-1.5">Industry Template</div>
+            <div className="text-[10px] text-slate-500 mb-2">
+              Selects the ontology schema this project will use. The matching entity types, properties, relationships, and glossary terms are auto-applied so discovery starts with the right vocabulary.
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => setForm(f => ({ ...f, industry_template: '' }))}
+                className={`p-2.5 rounded-lg border text-left transition-colors ${form.industry_template === '' ? 'border-slate-400 bg-slate-800/60' : 'border-slate-800 hover:border-slate-700 hover:bg-slate-800/40'}`}>
+                <div className="text-[11px] font-semibold text-slate-200">None / Custom</div>
+                <div className="text-[9px] text-slate-500 mt-0.5">Start with the current default ontology — configure later.</div>
+              </button>
+              {templates.map(t => (
+                <button key={t.key} type="button" onClick={() => setForm(f => ({ ...f, industry_template: t.key }))}
+                  className={`p-2.5 rounded-lg border text-left transition-colors ${form.industry_template === t.key ? 'border-slate-400 bg-slate-800/60' : 'border-slate-800 hover:border-slate-700 hover:bg-slate-800/40'}`}>
+                  <div className="text-[11px] font-semibold text-slate-200">{t.name}</div>
+                  <div className="text-[9px] text-slate-500 mt-0.5 line-clamp-2 leading-snug">{t.description}</div>
+                  <div className="flex gap-1 mt-1.5 flex-wrap">
+                    {(t.standards || []).slice(0, 3).map(s => (
+                      <span key={s} className="text-[8.5px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">{s}</span>
+                    ))}
+                  </div>
+                  <div className="text-[9px] text-slate-500 mt-1.5 font-mono">{t.domains} types · {t.relationships} rels · {t.properties || 0} props · {t.glossary} terms</div>
+                </button>
+              ))}
+            </div>
+            {selectedTemplate && (
+              <div className="mt-2 p-2 rounded border border-slate-700 bg-slate-800/40 text-[10px] text-slate-400">
+                <span className="text-slate-300 font-semibold">{selectedTemplate.name}</span> will be applied to the ontology on project creation —
+                <span className="text-slate-300 font-mono"> {selectedTemplate.domains}</span> entity types,
+                <span className="text-slate-300 font-mono"> {selectedTemplate.relationships}</span> relationships,
+                <span className="text-slate-300 font-mono"> {selectedTemplate.properties || 0}</span> properties,
+                <span className="text-slate-300 font-mono"> {selectedTemplate.glossary}</span> glossary terms.
+              </div>
+            )}
+          </div>
+
           <div>
             <div className="text-xs text-slate-400 mb-1.5">Sensitivity Ceiling</div>
             <div className="flex gap-2 flex-wrap">
               {CEILINGS.map(c => (
                 <button key={c} type="button" onClick={() => setForm(f=>({...f, sensitivity_ceiling:c}))}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${form.sensitivity_ceiling === c ? 'border-blue-600 bg-blue-600/20 text-blue-300' : 'border-slate-700 bg-slate-800/50 text-slate-500'}`}>
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${form.sensitivity_ceiling === c ? 'border-slate-400 bg-slate-700/60 text-slate-200' : 'border-slate-700 bg-slate-800/50 text-slate-500'}`}>
                   {c.replace('_',' ')}
                 </button>
               ))}
@@ -94,6 +141,14 @@ function ProjectCard({ project, onSelect, onArchive, onDelete }) {
         <ClassBadge cls={project.sensitivity_ceiling}/>
       </div>
       {project.description && <p className="text-xs text-slate-500 mb-3 line-clamp-2">{project.description}</p>}
+      {project.industry_template && (
+        <div className="mb-3 flex items-center gap-1">
+          <span className="text-[9px] uppercase tracking-wider text-slate-600">Industry</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">
+            {project.industry_template}
+          </span>
+        </div>
+      )}
       <div className="flex items-center justify-between text-[10px] text-slate-600">
         <span>Created {formatDate(project.created_at)}</span>
         <div className="flex items-center gap-3">
