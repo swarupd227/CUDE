@@ -38,6 +38,9 @@ async function initDatabase() {
     // Ontology schema
     const migration005 = path.join(__dirname, 'migrations', '005_ontology_schema.sql');
     try { await runMigration(migration005); } catch (_) {}
+    // Ontology v2 — hierarchy + properties + cardinality
+    const migration006 = path.join(__dirname, 'migrations', '006_ontology_v2.sql');
+    try { await runMigration(migration006); } catch (e) { console.log('⚠️  006 migration warning:', e.message); }
     console.log('✅  Migrations complete.');
   } catch (e) {
     console.error('⚠️  Migration warning:', e.message);

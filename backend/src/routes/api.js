@@ -408,17 +408,13 @@ router.get('/relationships', async (req, res) => {
     const graphService = require('../services/graphService');
     if (graphService.isAvailable()) {
       const projectCode = req.query.project || req.query.project_code;
-      if (projectCode) {
-        const graph = await graphService.getProjectGraph(projectCode, 50);
-        if (graph && graph.nodes.length > 0) return res.json({ ...graph, source: 'neo4j' });
-      }
-      // If no project filter, get all relationships
+      // Build active asset ID set from PostgreSQL to filter stale Neo4j nodes
       const { query: dbQuery } = require('../db/pool');
-      const projectCodes = await dbQuery('SELECT DISTINCT project_code FROM assets WHERE project_code IS NOT NULL LIMIT 5');
-      for (const row of projectCodes.rows) {
-        const graph = await graphService.getProjectGraph(row.project_code, 50);
-        if (graph && graph.nodes.length > 0) return res.json({ ...graph, source: 'neo4j' });
-      }
+      const pgResult = await dbQuery('SELECT id FROM assets');
+      const activeAssetIds = new Set(pgResult.rows.map(r => r.id));
+      // Pass projectCode (or null for all projects) and active set as filter
+      const graph = await graphService.getProjectGraph(projectCode || null, 500, activeAssetIds);
+      if (graph && graph.nodes.length > 0) return res.json({ ...graph, source: 'neo4j' });
     }
   } catch (_) {}
 
@@ -432,7 +428,7 @@ router.get('/relationships', async (req, res) => {
        FROM asset_relationships ar
        JOIN assets a1 ON ar.source_asset_id = a1.id
        JOIN assets a2 ON ar.target_asset_id = a2.id
-       ORDER BY ar.confidence DESC LIMIT 100`
+       ORDER BY ar.confidence DESC LIMIT 1000`
     );
     if (relResult.rows.length > 0) {
       const nodesMap = {};
@@ -443,7 +439,7 @@ router.get('/relationships', async (req, res) => {
         edges.push({ source: r.source_asset_id, target: r.target_asset_id, relationship: r.relationship_type, confidence: parseFloat(r.confidence) });
       }
       // Add orphan assets (those not in any relationship)
-      const allAssets = await dbQuery('SELECT id, file_name, content_domain, data_classification, classification_zone, classification_confidence, project_code FROM assets WHERE id != ALL($1) LIMIT 50', [Object.keys(nodesMap)]);
+      const allAssets = await dbQuery('SELECT id, file_name, content_domain, data_classification, classification_zone, classification_confidence, project_code FROM assets WHERE id != ALL($1) LIMIT 500', [Object.keys(nodesMap)]);
       for (const a of allAssets.rows) {
         nodesMap[a.id] = { id: a.id, label: a.file_name?.length > 28 ? a.file_name.substring(0,25)+'...' : a.file_name, full_name: a.file_name, domain: a.content_domain, classification: a.data_classification, zone: a.classification_zone, confidence: a.classification_confidence, project: a.project_code };
       }
@@ -502,7 +498,7 @@ router.post('/ontology/domains', async (req, res) => {
 router.patch('/ontology/domains/:id', async (req, res) => {
   try {
     const { query: dbQuery } = require('../db/pool');
-    const fields = ['label','description','color','initials','icon','enabled','priority','properties'].filter(f => req.body[f] !== undefined);
+    const fields = ['label','description','color','initials','icon','enabled','priority','properties','parent_code','is_abstract'].filter(f => req.body[f] !== undefined);
     if (!fields.length) return res.json({ domain: null });
     const sets = fields.map((f, i) => `${f} = $${i + 2}`).join(', ');
     const values = fields.map(f => f === 'properties' ? JSON.stringify(req.body[f]) : req.body[f]);
@@ -552,7 +548,7 @@ router.post('/ontology/relationships', async (req, res) => {
 router.patch('/ontology/relationships/:id', async (req, res) => {
   try {
     const { query: dbQuery } = require('../db/pool');
-    const fields = ['label','description','color','abbreviation','source_domain','target_domain','enabled','priority'].filter(f => req.body[f] !== undefined);
+    const fields = ['label','description','color','abbreviation','source_domain','target_domain','enabled','priority','cardinality','inverse_code','parent_code'].filter(f => req.body[f] !== undefined);
     if (!fields.length) return res.json({ relationship: null });
     const sets = fields.map((f, i) => `${f} = $${i + 2}`).join(', ');
     const values = fields.map(f => req.body[f]);
@@ -573,51 +569,15 @@ router.delete('/ontology/relationships/:id', async (req, res) => {
 router.post('/ontology/apply-template', async (req, res) => {
   const { template } = req.body;
   const { TEMPLATES } = require('../data/ontologyTemplates');
-  const tmpl = TEMPLATES[template];
-  if (!tmpl) return res.status(400).json({ error: `Unknown template: ${template}. Available: ${Object.keys(TEMPLATES).join(', ')}` });
+  if (!TEMPLATES[template]) return res.status(400).json({ error: `Unknown template: ${template}. Available: ${Object.keys(TEMPLATES).join(', ')}` });
 
   try {
+    const { applyTemplateToOntology } = require('../services/ontologyTemplateService');
     const { query: dbQuery } = require('../db/pool');
-    let domainsAdded = 0, relsAdded = 0, glossaryAdded = 0;
-
-    // Apply domains
-    for (const d of tmpl.domains) {
-      try {
-        await dbQuery(
-          `INSERT INTO ontology_domains (domain_code, label, description, color, initials, icon)
-           VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (domain_code) DO UPDATE SET label=$2, description=$3, color=$4, initials=$5, icon=$6, updated_at=now()`,
-          [d.domain_code, d.label, d.description || '', d.color, d.initials, d.icon || '📄']
-        );
-        domainsAdded++;
-      } catch (_) {}
-    }
-
-    // Apply relationships
-    for (const r of tmpl.relationships) {
-      try {
-        await dbQuery(
-          `INSERT INTO ontology_relationships (relationship_code, label, description, color, abbreviation)
-           VALUES ($1,$2,$3,$4,$5) ON CONFLICT (relationship_code) DO UPDATE SET label=$2, description=$3, color=$4, abbreviation=$5, updated_at=now()`,
-          [r.relationship_code, r.label, r.description || '', r.color, r.abbreviation]
-        );
-        relsAdded++;
-      } catch (_) {}
-    }
-
-    // Apply glossary terms
-    for (const g of (tmpl.glossary || [])) {
-      try {
-        await dbQuery(
-          `INSERT INTO business_terms (id, term, definition, category, synonyms, related_signals, created_at, updated_at)
-           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW(), NOW()) ON CONFLICT (term) DO NOTHING`,
-          [g.term, g.definition || '', g.category || 'General', g.synonyms || [], g.related_signals || []]
-        );
-        glossaryAdded++;
-      } catch (_) {}
-    }
+    const result = await applyTemplateToOntology(template);
 
     audit({ actor_type:'USER', actor_id:req.user?.email||'admin', action:'ontology.template_applied',
-      entity_type:'ontology', entity_id:template, after_state:{ template, domains: domainsAdded, relationships: relsAdded, glossary: glossaryAdded } });
+      entity_type:'ontology', entity_id:template, after_state:{ template, ...result.counts } });
 
     // Return the full updated schema
     const domains = await dbQuery('SELECT * FROM ontology_domains ORDER BY priority');
@@ -625,121 +585,443 @@ router.post('/ontology/apply-template', async (req, res) => {
     const glossary = await dbQuery('SELECT * FROM business_terms ORDER BY category, term');
 
     res.json({
-      template: tmpl.name, applied: true,
+      template: result.template, applied: true,
+      standards: result.standards,
       domains: domains.rows, relationships: relationships.rows, glossary: glossary.rows,
-      counts: { domains: domainsAdded, relationships: relsAdded, glossary: glossaryAdded },
+      counts: result.counts,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.get('/ontology/templates', (req, res) => {
   const { TEMPLATES } = require('../data/ontologyTemplates');
-  const list = Object.entries(TEMPLATES).map(([key, t]) => ({
-    key, name: t.name, description: t.description,
-    domains: t.domains.length, relationships: t.relationships.length, glossary: (t.glossary || []).length,
-  }));
+  const list = Object.entries(TEMPLATES).map(([key, t]) => {
+    const propCount = t.properties
+      ? Object.values(t.properties).reduce((s, arr) => s + arr.length, 0)
+      : 0;
+    return {
+      key, name: t.name, description: t.description,
+      standards: t.standards || [],
+      domains: t.domains.length,
+      relationships: t.relationships.length,
+      properties: propCount,
+      glossary: (t.glossary || []).length,
+    };
+  });
   res.json({ templates: list });
+});
+
+// Ontology usage stats — asset counts, relationship usage, cross-domain matrix
+router.get('/ontology/stats', async (req, res) => {
+  try {
+    const { query: dbQuery } = require('../db/pool');
+
+    // Asset count per entity type
+    const domainCounts = await dbQuery(
+      `SELECT content_domain as code, COUNT(*) as count
+       FROM assets WHERE content_domain IS NOT NULL
+       GROUP BY content_domain ORDER BY count DESC`
+    );
+
+    // Relationship usage count per type
+    const relCounts = await dbQuery(
+      `SELECT relationship_type as code, COUNT(*) as count
+       FROM asset_relationships
+       WHERE relationship_type NOT IN ('SAME_PROJECT','BELONGS_TO','SAME_ENTITY')
+       GROUP BY relationship_type ORDER BY count DESC`
+    );
+
+    // Cross-domain matrix: which entity types are connected by which relationships
+    const matrix = await dbQuery(
+      `SELECT a1.content_domain as source_domain, a2.content_domain as target_domain,
+              ar.relationship_type, COUNT(*) as count
+       FROM asset_relationships ar
+       JOIN assets a1 ON ar.source_asset_id = a1.id
+       JOIN assets a2 ON ar.target_asset_id = a2.id
+       WHERE ar.relationship_type NOT IN ('SAME_PROJECT','BELONGS_TO','SAME_ENTITY')
+       AND a1.content_domain IS NOT NULL AND a2.content_domain IS NOT NULL
+       GROUP BY a1.content_domain, a2.content_domain, ar.relationship_type
+       ORDER BY count DESC`
+    );
+
+    // Total counts
+    const totals = await dbQuery(`SELECT
+      (SELECT COUNT(*) FROM assets) as asset_count,
+      (SELECT COUNT(*) FROM asset_relationships WHERE relationship_type NOT IN ('SAME_PROJECT','BELONGS_TO','SAME_ENTITY')) as relationship_count,
+      (SELECT COUNT(*) FROM business_terms) as concept_count`);
+
+    res.json({
+      domainCounts: Object.fromEntries(domainCounts.rows.map(r => [r.code, parseInt(r.count)])),
+      relationshipCounts: Object.fromEntries(relCounts.rows.map(r => [r.code, parseInt(r.count)])),
+      matrix: matrix.rows.map(r => ({
+        source: r.source_domain, target: r.target_domain,
+        relationship: r.relationship_type, count: parseInt(r.count),
+      })),
+      totals: {
+        assets: parseInt(totals.rows[0].asset_count),
+        relationships: parseInt(totals.rows[0].relationship_count),
+        concepts: parseInt(totals.rows[0].concept_count),
+      },
+    });
+  } catch (e) {
+    res.json({ domainCounts: {}, relationshipCounts: {}, matrix: [], totals: {}, error: e.message });
+  }
+});
+
+// ── Ontology Properties (entity-type schema attributes) ─────────────────────
+
+router.get('/ontology/properties', async (req, res) => {
+  try {
+    const { query: dbQuery } = require('../db/pool');
+    const { domain } = req.query;
+    const rows = domain
+      ? (await dbQuery('SELECT * FROM ontology_properties WHERE domain_code = $1 ORDER BY display_order, property_label', [domain])).rows
+      : (await dbQuery('SELECT * FROM ontology_properties ORDER BY domain_code, display_order, property_label')).rows;
+    res.json({ properties: rows });
+  } catch (e) { res.json({ properties: [], error: e.message }); }
+});
+
+router.get('/ontology/properties/:domainCode', async (req, res) => {
+  try {
+    const { query: dbQuery } = require('../db/pool');
+    const result = await dbQuery(
+      'SELECT * FROM ontology_properties WHERE domain_code = $1 ORDER BY display_order, property_label',
+      [req.params.domainCode]
+    );
+    res.json({ properties: result.rows });
+  } catch (e) { res.json({ properties: [], error: e.message }); }
+});
+
+router.post('/ontology/properties', async (req, res) => {
+  const { domain_code, property_name, property_label, data_type, is_required, is_unique, default_value, enum_values, reference_domain, description, display_order } = req.body;
+  if (!domain_code || !property_name || !property_label) {
+    return res.status(400).json({ error: 'domain_code, property_name and property_label are required' });
+  }
+  try {
+    const { query: dbQuery } = require('../db/pool');
+    const pn = property_name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    const result = await dbQuery(
+      `INSERT INTO ontology_properties
+         (domain_code, property_name, property_label, data_type, is_required, is_unique,
+          default_value, enum_values, reference_domain, description, display_order)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT (domain_code, property_name) DO UPDATE
+         SET property_label=$3, data_type=$4, is_required=$5, is_unique=$6,
+             default_value=$7, enum_values=$8, reference_domain=$9, description=$10,
+             display_order=$11, updated_at=now()
+       RETURNING *`,
+      [
+        domain_code, pn, property_label,
+        data_type || 'text',
+        !!is_required, !!is_unique,
+        default_value || null,
+        Array.isArray(enum_values) && enum_values.length ? enum_values : null,
+        reference_domain || null,
+        description || '',
+        display_order ?? 50,
+      ]
+    );
+    res.status(201).json({ property: result.rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.patch('/ontology/properties/:id', async (req, res) => {
+  try {
+    const { query: dbQuery } = require('../db/pool');
+    const fields = ['property_label','data_type','is_required','is_unique','default_value','enum_values','reference_domain','description','display_order']
+      .filter(f => req.body[f] !== undefined);
+    if (!fields.length) return res.json({ property: null });
+    const sets = fields.map((f, i) => `${f} = $${i + 2}`).join(', ');
+    const values = fields.map(f => {
+      if (f === 'enum_values') return Array.isArray(req.body[f]) && req.body[f].length ? req.body[f] : null;
+      return req.body[f];
+    });
+    const result = await dbQuery(
+      `UPDATE ontology_properties SET ${sets}, updated_at=now() WHERE id=$1 RETURNING *`,
+      [req.params.id, ...values]
+    );
+    res.json({ property: result.rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/ontology/properties/:id', async (req, res) => {
+  try {
+    const { query: dbQuery } = require('../db/pool');
+    await dbQuery('DELETE FROM ontology_properties WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Ontology Validation (schema-violation detector) ─────────────────────────
+// Scans assets and relationships against the active ontology and reports
+// constraint violations: missing required properties, cardinality breaches,
+// references to disabled / unknown entity types.
+router.get('/ontology/violations', async (req, res) => {
+  try {
+    const { query: dbQuery } = require('../db/pool');
+
+    // Active schema snapshot
+    const props = (await dbQuery('SELECT * FROM ontology_properties')).rows;
+    const domains = (await dbQuery('SELECT * FROM ontology_domains')).rows;
+    const rels    = (await dbQuery('SELECT * FROM ontology_relationships')).rows;
+
+    const requiredByDomain = {};
+    for (const p of props) {
+      if (!p.is_required) continue;
+      (requiredByDomain[p.domain_code] = requiredByDomain[p.domain_code] || []).push(p);
+    }
+    const enabledDomains = new Set(domains.filter(d => d.enabled !== false).map(d => d.domain_code));
+    const cardinalityByRel = Object.fromEntries(rels.map(r => [r.relationship_code, r.cardinality || 'N:M']));
+
+    const violations = [];
+
+    // 1) Missing required properties on assets
+    if (Object.keys(requiredByDomain).length) {
+      const domainCodes = Object.keys(requiredByDomain);
+      const assets = (await dbQuery(
+        `SELECT id, file_name, content_domain, domain_metadata, raw_metadata FROM assets WHERE content_domain = ANY($1::text[])`,
+        [domainCodes]
+      )).rows;
+      for (const a of assets) {
+        const meta = { ...(a.domain_metadata || {}), ...(a.raw_metadata || {}) };
+        for (const p of requiredByDomain[a.content_domain] || []) {
+          const present = meta[p.property_name] !== undefined && meta[p.property_name] !== null && meta[p.property_name] !== '';
+          if (!present) {
+            violations.push({
+              severity: 'warning',
+              kind: 'missing_required_property',
+              asset_id: a.id,
+              asset_name: a.file_name,
+              entity_type: a.content_domain,
+              property: p.property_name,
+              message: `${a.file_name}: missing required property "${p.property_label}"`,
+            });
+          }
+        }
+      }
+    }
+
+    // 2) Assets pointing to disabled or unknown entity types
+    const orphanDomains = (await dbQuery(
+      `SELECT id, file_name, content_domain FROM assets
+       WHERE content_domain IS NOT NULL AND content_domain NOT IN (
+         SELECT domain_code FROM ontology_domains WHERE enabled = true
+       )`
+    )).rows;
+    for (const a of orphanDomains) {
+      violations.push({
+        severity: 'error',
+        kind: 'unknown_entity_type',
+        asset_id: a.id,
+        asset_name: a.file_name,
+        entity_type: a.content_domain,
+        message: `${a.file_name}: references disabled or unknown entity type "${a.content_domain}"`,
+      });
+    }
+
+    // 3) Cardinality violations — only 1:1 and 1:N are easily checkable
+    for (const r of rels) {
+      if (r.is_structural) continue;
+      const card = (r.cardinality || 'N:M').toUpperCase();
+      if (card === 'N:M') continue;
+      // For 1:1 or 1:N: each source asset may have at most 1 outgoing edge of this type
+      if (card === '1:1' || card === '1:N' || card === 'N:1') {
+        const sourceCol = (card === 'N:1') ? 'target_asset_id' : 'source_asset_id';
+        const offenders = await dbQuery(
+          `SELECT ${sourceCol} as offender, COUNT(*) as c
+           FROM asset_relationships
+           WHERE relationship_type = $1
+           GROUP BY ${sourceCol} HAVING COUNT(*) > 1`,
+          [r.relationship_code]
+        );
+        for (const o of offenders.rows) {
+          const name = (await dbQuery('SELECT file_name FROM assets WHERE id = $1', [o.offender])).rows[0]?.file_name || o.offender;
+          violations.push({
+            severity: 'error',
+            kind: 'cardinality_violation',
+            relationship: r.relationship_code,
+            asset_id: o.offender,
+            asset_name: name,
+            count: parseInt(o.c),
+            message: `${r.label} is ${card} but "${name}" has ${o.c} edges`,
+          });
+        }
+      }
+    }
+
+    res.json({
+      violations,
+      summary: {
+        total: violations.length,
+        errors: violations.filter(v => v.severity === 'error').length,
+        warnings: violations.filter(v => v.severity === 'warning').length,
+      },
+    });
+  } catch (e) {
+    res.json({ violations: [], summary: { total: 0, errors: 0, warnings: 0 }, error: e.message });
+  }
 });
 
 // ── Enterprise Graph API ────────────────────────────────────────────────────
 const STRUCTURAL_EDGES = new Set(['SAME_PROJECT', 'BELONGS_TO']);
 
+// Compute graph stats directly from PostgreSQL (always works, even when Neo4j is down)
+async function computeStatsFromPostgres() {
+  const { query: dbQuery } = require('../db/pool');
+  const stats = { available: true, nodeCount: 0, edgeCount: 0, density: 0, avgDegree: 0, orphanedNodes: 0, relationshipTypes: {}, domainDistribution: {}, conceptNodes: 0 };
+
+  // Node count
+  const nc = await dbQuery('SELECT COUNT(*) as c FROM assets');
+  stats.nodeCount = parseInt(nc.rows[0].c) || 0;
+
+  // Edge count (semantic only — exclude structural)
+  const ec = await dbQuery(
+    `SELECT COUNT(*) as c FROM asset_relationships WHERE relationship_type NOT IN ('SAME_PROJECT','BELONGS_TO','SAME_ENTITY')`
+  );
+  stats.edgeCount = parseInt(ec.rows[0].c) || 0;
+
+  // Relationship type distribution
+  const rd = await dbQuery(
+    `SELECT relationship_type as t, COUNT(*) as c FROM asset_relationships
+     WHERE relationship_type NOT IN ('SAME_PROJECT','BELONGS_TO','SAME_ENTITY')
+     GROUP BY relationship_type ORDER BY c DESC`
+  );
+  rd.rows.forEach(r => { stats.relationshipTypes[r.t] = parseInt(r.c); });
+
+  // Domain distribution
+  const dd = await dbQuery(
+    `SELECT content_domain as d, COUNT(*) as c FROM assets WHERE content_domain IS NOT NULL GROUP BY content_domain ORDER BY c DESC`
+  );
+  dd.rows.forEach(r => { stats.domainDistribution[r.d] = parseInt(r.c); });
+
+  // Orphan count (assets with no semantic relationships)
+  const oc = await dbQuery(
+    `SELECT COUNT(*) as c FROM assets a
+     WHERE NOT EXISTS (
+       SELECT 1 FROM asset_relationships ar
+       WHERE (ar.source_asset_id = a.id OR ar.target_asset_id = a.id)
+       AND ar.relationship_type NOT IN ('SAME_PROJECT','BELONGS_TO','SAME_ENTITY')
+     )`
+  );
+  stats.orphanedNodes = parseInt(oc.rows[0].c) || 0;
+
+  // Concept nodes (from business_terms)
+  try {
+    const cc = await dbQuery('SELECT COUNT(*) as c FROM business_terms');
+    stats.conceptNodes = parseInt(cc.rows[0].c) || 0;
+  } catch (_) {}
+
+  // Density and avg degree
+  stats.density = stats.nodeCount > 1 ? parseFloat(((2 * stats.edgeCount) / (stats.nodeCount * (stats.nodeCount - 1))).toFixed(4)) : 0;
+  stats.avgDegree = stats.nodeCount > 0 ? parseFloat(((2 * stats.edgeCount) / stats.nodeCount).toFixed(2)) : 0;
+
+  return stats;
+}
+
 router.get('/graph/stats', async (req, res) => {
   try {
+    // Try Neo4j first
     const graphService = require('../services/graphService');
-    if (!graphService.isAvailable()) return res.json({ available: false, nodeCount: 0, edgeCount: 0 });
-    const stats = await graphService.getGraphStatistics();
-    if (!stats) return res.json({ available: false, nodeCount: 0, edgeCount: 0 });
-
-    // Defensive: ensure stats use PostgreSQL node count and exclude structural edges
-    try {
-      const { query: dbQuery } = require('../db/pool');
-      const pgCount = await dbQuery('SELECT COUNT(*) as c FROM assets');
-      stats.nodeCount = parseInt(pgCount.rows[0].c) || stats.nodeCount;
-    } catch (_) {}
-
-    // Filter structural edges from counts and distribution
-    if (stats.relationshipTypes) {
-      let semanticEdgeCount = 0;
-      const filtered = {};
-      for (const [type, count] of Object.entries(stats.relationshipTypes)) {
-        if (!STRUCTURAL_EDGES.has(type)) {
-          filtered[type] = count;
-          semanticEdgeCount += count;
+    if (graphService.isAvailable()) {
+      const neoStats = await graphService.getGraphStatistics();
+      if (neoStats && neoStats.nodeCount > 0) {
+        // Filter structural edges
+        if (neoStats.relationshipTypes) {
+          let semanticEdgeCount = 0;
+          const filtered = {};
+          for (const [type, count] of Object.entries(neoStats.relationshipTypes)) {
+            if (!STRUCTURAL_EDGES.has(type)) { filtered[type] = count; semanticEdgeCount += count; }
+          }
+          neoStats.relationshipTypes = filtered;
+          neoStats.edgeCount = semanticEdgeCount;
         }
+        // Use PostgreSQL node count as ground truth
+        try {
+          const { query: dbQuery } = require('../db/pool');
+          const pgCount = await dbQuery('SELECT COUNT(*) as c FROM assets');
+          neoStats.nodeCount = parseInt(pgCount.rows[0].c) || neoStats.nodeCount;
+        } catch (_) {}
+        neoStats.density = neoStats.nodeCount > 1 ? parseFloat(((2 * neoStats.edgeCount) / (neoStats.nodeCount * (neoStats.nodeCount - 1))).toFixed(4)) : 0;
+        neoStats.avgDegree = neoStats.nodeCount > 0 ? parseFloat(((2 * neoStats.edgeCount) / neoStats.nodeCount).toFixed(2)) : 0;
+        return res.json({ available: true, ...neoStats });
       }
-      stats.relationshipTypes = filtered;
-      stats.edgeCount = semanticEdgeCount;
     }
-
-    // Recalculate density and avgDegree with corrected counts
-    stats.density = stats.nodeCount > 1 ? parseFloat(((2 * stats.edgeCount) / (stats.nodeCount * (stats.nodeCount - 1))).toFixed(4)) : 0;
-    stats.avgDegree = stats.nodeCount > 0 ? parseFloat(((2 * stats.edgeCount) / stats.nodeCount).toFixed(2)) : 0;
-
-    res.json({ available: true, ...stats });
-  } catch (e) { res.json({ available: false, error: e.message }); }
+    // Fallback: compute from PostgreSQL
+    const stats = await computeStatsFromPostgres();
+    res.json(stats);
+  } catch (e) {
+    try {
+      const stats = await computeStatsFromPostgres();
+      res.json(stats);
+    } catch (e2) {
+      res.json({ available: false, nodeCount: 0, edgeCount: 0, error: e2.message });
+    }
+  }
 });
 
 router.get('/graph/top-connected', async (req, res) => {
+  const limit = parseInt(req.query.limit) || 10;
   try {
+    // Try Neo4j first (cleaned via startup reconciliation)
     const graphService = require('../services/graphService');
-    if (!graphService.isAvailable()) return res.json({ assets: [] });
-    let assets = await graphService.getMostConnectedAssets(parseInt(req.query.limit) || 10);
+    const { query: dbQuery } = require('../db/pool');
 
-    // Fallback: if graphService returns empty (old code without structural filter), compute from PostgreSQL
-    if (!assets || assets.length === 0) {
-      try {
-        const { query: dbQuery } = require('../db/pool');
-        const result = await dbQuery(
-          `SELECT a.id, a.file_name as name, a.content_domain as domain, a.data_classification as classification,
-                  a.project_code as project, COUNT(ar.id) as degree
-           FROM assets a
-           LEFT JOIN asset_relationships ar ON a.id = ar.source_asset_id OR a.id = ar.target_asset_id
-           GROUP BY a.id, a.file_name, a.content_domain, a.data_classification, a.project_code
-           HAVING COUNT(ar.id) > 0
-           ORDER BY degree DESC LIMIT $1`,
-          [parseInt(req.query.limit) || 10]
-        );
-        assets = result.rows.map(r => ({
-          id: r.id, name: r.name, domain: r.domain,
-          classification: r.classification, project: r.project,
-          degree: parseInt(r.degree), relationshipTypes: [],
-        }));
-      } catch (_) {}
+    if (graphService.isAvailable()) {
+      const neo4jAssets = await graphService.getMostConnectedAssets(limit);
+      if (neo4jAssets && neo4jAssets.length > 0) {
+        // Cross-check with PostgreSQL to filter any remaining stale nodes
+        const pgResult = await dbQuery('SELECT id FROM assets');
+        const activeIds = new Set(pgResult.rows.map(r => r.id));
+        const filtered = neo4jAssets.filter(a => activeIds.has(a.id));
+        if (filtered.length > 0) return res.json({ assets: filtered });
+      }
     }
 
-    res.json({ assets: assets || [] });
-  } catch (e) { res.json({ assets: [] }); }
+    // Fallback to PostgreSQL
+    const result = await dbQuery(
+      `SELECT a.id, a.file_name as name, a.content_domain as domain, a.data_classification as classification,
+              a.classification_zone as zone, a.project_code as project, COUNT(ar.id) as degree,
+              array_agg(DISTINCT ar.relationship_type) as rel_types
+       FROM assets a
+       JOIN asset_relationships ar ON (a.id = ar.source_asset_id OR a.id = ar.target_asset_id)
+       WHERE ar.relationship_type NOT IN ('SAME_PROJECT','BELONGS_TO','SAME_ENTITY')
+       GROUP BY a.id, a.file_name, a.content_domain, a.data_classification, a.classification_zone, a.project_code
+       ORDER BY degree DESC LIMIT $1`,
+      [limit]
+    );
+    const assets = result.rows.map(r => ({
+      id: r.id, name: r.name, domain: r.domain,
+      classification: r.classification, zone: r.zone, project: r.project,
+      degree: parseInt(r.degree),
+      relationshipTypes: r.rel_types || [],
+    }));
+    res.json({ assets });
+  } catch (e) { res.json({ assets: [], error: e.message }); }
 });
 
 router.get('/graph/orphaned', async (req, res) => {
+  const limit = parseInt(req.query.limit) || 50;
   try {
-    const graphService = require('../services/graphService');
-    if (!graphService.isAvailable()) return res.json({ assets: [] });
-    let assets = await graphService.getOrphanedAssets(parseInt(req.query.limit) || 50);
-
-    // Fallback: if graphService returns empty (old code), compute from PostgreSQL
-    if (!assets || assets.length === 0) {
-      try {
-        const { query: dbQuery } = require('../db/pool');
-        const result = await dbQuery(
-          `SELECT a.id, a.file_name as name, a.content_domain as domain,
-                  a.data_classification as classification, a.project_code as project
-           FROM assets a
-           LEFT JOIN asset_relationships ar ON a.id = ar.source_asset_id OR a.id = ar.target_asset_id
-           GROUP BY a.id, a.file_name, a.content_domain, a.data_classification, a.project_code
-           HAVING COUNT(ar.id) = 0
-           LIMIT $1`,
-          [parseInt(req.query.limit) || 50]
-        );
-        assets = result.rows.map(r => ({
-          id: r.id, name: r.name, domain: r.domain,
-          classification: r.classification, project: r.project,
-        }));
-      } catch (_) {}
-    }
-    res.json({ assets: assets || [] });
-  } catch (e) { res.json({ assets: [] }); }
+    // Use PostgreSQL as source of truth (Neo4j may contain stale data)
+    const { query: dbQuery } = require('../db/pool');
+    const result = await dbQuery(
+      `SELECT a.id, a.file_name as name, a.content_domain as domain,
+              a.data_classification as classification, a.classification_zone as zone, a.project_code as project
+       FROM assets a
+       WHERE NOT EXISTS (
+         SELECT 1 FROM asset_relationships ar
+         WHERE (ar.source_asset_id = a.id OR ar.target_asset_id = a.id)
+         AND ar.relationship_type NOT IN ('SAME_PROJECT','BELONGS_TO','SAME_ENTITY')
+       )
+       LIMIT $1`,
+      [limit]
+    );
+    const assets = result.rows.map(r => ({
+      id: r.id, name: r.name, domain: r.domain,
+      classification: r.classification, zone: r.zone, project: r.project,
+    }));
+    res.json({ assets });
+  } catch (e) { res.json({ assets: [], error: e.message }); }
 });
 
 router.get('/graph/neighbors/:id', async (req, res) => {
