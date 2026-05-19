@@ -1,30 +1,24 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import {
-  GitMerge, Search, Database, Layers, KeyRound, ShieldAlert,
-  ArrowRight, ArrowLeft, AlertTriangle, ChevronRight, ChevronDown, Upload,
-  ExternalLink, Sparkles, Info,
+  GitMerge, Search, Database, KeyRound, ShieldAlert,
+  AlertTriangle, ChevronRight,
 } from 'lucide-react';
 import { Spinner } from '../components/UI';
 
 const API = '/api';
 
-// Layer ordering for left→right "swim lane" visualization
 const LAYER_ORDER = ['source', 'staging', 'intermediate', 'mart'];
 const LAYER_LABEL = { source: 'Source', staging: 'Staging', intermediate: 'Intermediate', mart: 'Mart' };
 const LAYER_COLOR = { source: '#7d4a44', staging: '#5a7f6a', intermediate: '#5b6b8c', mart: '#86618c' };
 
 const TRANSFORM_LABEL = {
-  direct: 'Direct',
-  expression: 'Expression',
-  aggregation: 'Aggregation',
-  join: 'Join',
-  window: 'Window',
-  case: 'CASE',
+  direct: 'direct', expression: 'expr', aggregation: 'agg',
+  join: 'join', window: 'window', case: 'case', fk_reference: 'fk',
 };
 
 export default function Lineage() {
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
   const [assets, setAssets] = useState([]);
   const [stats, setStats] = useState({ columns: 0, assets_with_columns: 0, lineage_edges: 0, pii_columns: 0 });
   const [selectedAsset, setSelectedAsset] = useState(null);
@@ -37,26 +31,18 @@ export default function Lineage() {
   const [loadingLineage, setLoadingLineage] = useState(false);
   const [depth, setDepth] = useState(3);
   const [search, setSearch] = useState('');
-  const [showImpact, setShowImpact] = useState(false);
-
-  const loadStats = async () => {
-    const s = await fetch(`${API}/lineage/stats`).then(r => r.json());
-    setStats(s);
-  };
-
-  const loadAssets = async () => {
-    const r = await fetch(`${API}/lineage/assets`).then(r => r.json());
-    setAssets(r.assets || []);
-    setLoading(false);
-    return r.assets || [];
-  };
 
   useEffect(() => {
-    loadStats();
-    loadAssets().then((rows) => {
+    Promise.all([
+      fetch(`${API}/lineage/stats`).then(r => r.json()),
+      fetch(`${API}/lineage/assets`).then(r => r.json()),
+    ]).then(([s, r]) => {
+      setStats(s);
+      setAssets(r.assets || []);
+      setLoading(false);
       const initialAssetId = searchParams.get('asset');
       if (initialAssetId) {
-        const a = rows.find(r => r.id === initialAssetId);
+        const a = (r.assets || []).find(x => x.id === initialAssetId);
         if (a) setSelectedAsset(a);
       }
     });
@@ -76,7 +62,7 @@ export default function Lineage() {
       });
   }, [selectedAsset]);
 
-  // Load upstream + downstream lineage when a column is selected
+  // Load lineage for the selected column
   useEffect(() => {
     if (!selectedColumn) { setUpstream([]); setDownstream([]); setImpact(null); return; }
     setLoadingLineage(true);
@@ -92,7 +78,7 @@ export default function Lineage() {
     }).catch(() => setLoadingLineage(false));
   }, [selectedColumn, depth]);
 
-  // Group assets by project, then by layer
+  // Group assets by project, then layer
   const groupedAssets = useMemo(() => {
     const q = search.toLowerCase();
     const filtered = search
@@ -101,7 +87,6 @@ export default function Lineage() {
           a.project?.toLowerCase().includes(q) ||
           a.layer?.toLowerCase().includes(q))
       : assets;
-
     const byProject = {};
     for (const a of filtered) {
       const proj = a.project || '(no project)';
@@ -120,64 +105,63 @@ export default function Lineage() {
 
   return (
     <div className="flex h-full">
-      {/* LEFT PANE — Asset Tree by Project & Layer */}
+      {/* LEFT PANE — Asset Tree */}
       <div className="w-72 flex-shrink-0 border-r border-slate-800 bg-slate-900/50 flex flex-col">
-        <div className="p-3 border-b border-slate-800 flex-shrink-0">
-          <h3 className="text-xs font-semibold text-slate-200 flex items-center gap-2">
-            <Layers size={13} className="text-slate-500"/>Models & Tables
+        <div className="px-4 py-3 border-b border-slate-800 flex-shrink-0">
+          <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+            <GitMerge size={14} className="text-slate-500"/>Column Lineage
           </h3>
-          <p className="text-[9px] text-slate-600 mt-0.5">{stats.assets_with_columns} assets · {stats.columns} columns · {stats.lineage_edges} edges</p>
+          <p className="text-[11px] text-slate-500 mt-0.5">{stats.assets_with_columns} assets · {stats.columns} columns · {stats.lineage_edges} edges</p>
         </div>
 
-        <div className="p-2 border-b border-slate-800">
+        <div className="px-3 py-2 border-b border-slate-800">
           <div className="relative">
-            <Search size={11} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-600"/>
-            <input className="input w-full pl-7 text-[10px] py-1.5" placeholder="Search models..."
+            <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-600"/>
+            <input className="input w-full pl-7 text-xs py-1.5" placeholder="Search assets..."
               value={search} onChange={e => setSearch(e.target.value)}/>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-1.5">
+        <div className="flex-1 overflow-y-auto px-2 py-2">
           {Object.keys(groupedAssets).length === 0 ? (
-            <div className="text-[10px] text-slate-600 p-3 text-center">
-              No assets with columns yet.<br/>
-              <span className="text-slate-500 mt-2 block">Scan a database via the <Link to="/connectors" className="text-slate-400 hover:text-slate-200 underline">Connectors</Link> page — column metadata and lineage will appear here automatically.</span>
+            <div className="text-xs text-slate-500 p-3 text-center">
+              No assets with columns yet.
+              <div className="mt-2 text-slate-600 leading-relaxed">
+                Scan a database from <Link to="/connectors" className="text-slate-400 hover:text-slate-200 underline">Connectors</Link>.
+              </div>
             </div>
           ) : Object.entries(groupedAssets).map(([project, layers]) => (
-            <div key={project} className="mb-3">
-              <div className="text-[9px] text-slate-500 uppercase tracking-wider px-2 mb-1 flex items-center gap-1">
-                <Database size={9}/>{project}
+            <div key={project} className="mb-4">
+              <div className="flex items-center gap-1.5 px-2 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                <Database size={10}/>{project}
               </div>
-              {LAYER_ORDER.map(layer => {
+              {LAYER_ORDER.concat(['other']).map(layer => {
                 const items = layers[layer];
                 if (!items?.length) return null;
                 return (
-                  <div key={layer} className="mb-1.5">
-                    <div className="px-2 text-[9px] font-medium mb-0.5" style={{ color: LAYER_COLOR[layer] }}>
-                      {LAYER_LABEL[layer]} <span className="text-slate-600 font-mono">({items.length})</span>
-                    </div>
+                  <div key={layer} className="mb-2">
+                    {layer !== 'other' && (
+                      <div className="px-2 text-[10px] font-medium mb-0.5" style={{ color: LAYER_COLOR[layer] || '#94a3b8' }}>
+                        {LAYER_LABEL[layer] || layer}
+                      </div>
+                    )}
                     {items.map(a => {
                       const isSelected = selectedAsset?.id === a.id;
                       return (
                         <button key={a.id} onClick={() => { setSelectedAsset(a); setSelectedColumn(null); }}
-                          className={`w-full text-left p-1.5 rounded mb-0.5 transition-colors flex items-center gap-2 ${
+                          className={`w-full text-left px-2 py-1.5 rounded mb-0.5 transition-colors flex items-center gap-2 ${
                             isSelected
-                              ? 'bg-slate-800/70 border-l-2 border-slate-400'
-                              : 'hover:bg-slate-800/40 border-l-2 border-transparent'
+                              ? 'bg-slate-800/80 border-l-2 border-slate-400'
+                              : 'hover:bg-slate-800/50 border-l-2 border-transparent'
                           }`}>
-                          <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: LAYER_COLOR[layer] }}/>
+                          <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: LAYER_COLOR[layer] || '#64748b' }}/>
                           <div className="flex-1 min-w-0">
-                            <div className="text-[11px] text-slate-200 truncate font-mono">{a.file_name.split('.').pop()}</div>
-                            <div className="text-[9px] text-slate-600 truncate">{a.file_name}</div>
+                            <div className="text-xs text-slate-200 truncate font-mono">{a.file_name.split('.').pop()}</div>
                           </div>
-                          <div className="flex flex-col items-end text-[9px] flex-shrink-0">
-                            <span className="text-slate-500 font-mono">{a.column_count}</span>
-                            {parseInt(a.pii_count) > 0 && (
-                              <span className="text-amber-500 flex items-center gap-0.5" title={`${a.pii_count} PII column(s)`}>
-                                <ShieldAlert size={8}/>{a.pii_count}
-                              </span>
-                            )}
-                          </div>
+                          <span className="text-[10px] text-slate-500 font-mono flex-shrink-0">{a.column_count}</span>
+                          {parseInt(a.pii_count) > 0 && (
+                            <ShieldAlert size={10} className="text-amber-500 flex-shrink-0" title={`${a.pii_count} PII columns`}/>
+                          )}
                         </button>
                       );
                     })}
@@ -187,250 +171,113 @@ export default function Lineage() {
             </div>
           ))}
         </div>
-
       </div>
 
       {/* CENTER PANE — Columns + Lineage */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900/30 flex-shrink-0">
-          <div className="min-w-0">
-            <h1 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
-              <GitMerge size={16} className="text-slate-500"/>Column-Level Lineage
-            </h1>
-            <p className="text-[10px] text-slate-500">
-              {selectedAsset ? <span className="font-mono">{selectedAsset.file_name}</span> : 'Select a model on the left to inspect its columns'}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-[10px] text-slate-500 flex items-center gap-1">
-              Depth:
-              <select className="input text-[10px] py-1" value={depth} onChange={e => setDepth(parseInt(e.target.value))}>
-                <option value="1">1 hop</option><option value="2">2 hops</option><option value="3">3 hops</option><option value="5">5 hops</option><option value="10">10 hops</option>
-              </select>
-            </label>
-          </div>
-        </div>
-
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {!selectedAsset ? (
-          /* Welcome view */
-          <div className="flex-1 flex items-center justify-center p-8">
-            <div className="max-w-md text-center">
-              <div className="w-16 h-16 rounded-full bg-slate-800/60 border border-slate-700 flex items-center justify-center mx-auto mb-4">
-                <GitMerge size={28} className="text-slate-400"/>
+          <EmptyState stats={stats}/>
+        ) : (
+          <>
+            {/* Asset header */}
+            <div className="flex items-center justify-between px-6 py-3 border-b border-slate-800 bg-slate-900/30 flex-shrink-0">
+              <div className="min-w-0">
+                <div className="text-xs text-slate-500 font-mono">{selectedAsset.project}{selectedAsset.layer && ` · ${selectedAsset.layer}`}</div>
+                <h1 className="text-base font-semibold text-slate-100 font-mono truncate">{selectedAsset.file_name}</h1>
               </div>
-              <div className="text-base font-semibold text-slate-200 mb-1">Column-Level Lineage</div>
-              <p className="text-xs text-slate-500 leading-relaxed mb-4">
-                Trace every column from its source through every transformation to every consumer.
-                Lineage is populated automatically as connectors scan your databases and warehouses.
-              </p>
-              <div className="grid grid-cols-2 gap-2 text-[10px]">
-                <div className="p-2.5 rounded border border-slate-800 bg-slate-900/50">
-                  <div className="text-xl font-semibold text-slate-200">{stats.columns}</div>
-                  <div className="text-slate-600 mt-0.5">Columns indexed</div>
-                </div>
-                <div className="p-2.5 rounded border border-slate-800 bg-slate-900/50">
-                  <div className="text-xl font-semibold text-slate-200">{stats.lineage_edges}</div>
-                  <div className="text-slate-600 mt-0.5">Lineage edges</div>
-                </div>
-                <div className="p-2.5 rounded border border-slate-800 bg-slate-900/50">
-                  <div className="text-xl font-semibold text-slate-200">{stats.assets_with_columns}</div>
-                  <div className="text-slate-600 mt-0.5">Assets with columns</div>
-                </div>
-                <div className="p-2.5 rounded border border-slate-800 bg-slate-900/50">
-                  <div className="text-xl font-semibold text-amber-400">{stats.pii_columns}</div>
-                  <div className="text-slate-600 mt-0.5">PII columns flagged</div>
-                </div>
-              </div>
-              <div className="mt-5 text-[10.5px] text-slate-500 leading-relaxed">
-                Select an asset on the left to inspect its columns and trace their lineage upstream and downstream.
+              <div className="flex items-center gap-3 text-xs">
+                <span className="text-slate-500">Depth</span>
+                <select className="input text-xs py-1" value={depth} onChange={e => setDepth(parseInt(e.target.value))}>
+                  {[1, 2, 3, 5, 10].map(d => <option key={d} value={d}>{d} {d === 1 ? 'hop' : 'hops'}</option>)}
+                </select>
               </div>
             </div>
-          </div>
-        ) : (
-          <div className="flex-1 overflow-y-auto">
-            {/* Column list for selected asset */}
-            <div className="border-b border-slate-800">
-              <div className="px-4 py-2 bg-slate-900/40 text-[10px] uppercase tracking-wider text-slate-500 flex items-center justify-between">
-                <span>Columns ({columns.length})</span>
-                <span className="text-slate-600">Click a column to see its lineage</span>
-              </div>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 divide-x divide-slate-800/40">
-                {columns.map(col => {
-                  const isSelected = selectedColumn?.id === col.id;
-                  return (
-                    <button key={col.id} onClick={() => setSelectedColumn(col)}
-                      className={`text-left p-2.5 border-b border-slate-800/60 transition-colors hover:bg-slate-800/40 ${
-                        isSelected ? 'bg-slate-800/70 border-l-2 border-l-slate-400' : 'border-l-2 border-l-transparent'
-                      }`}>
-                      <div className="flex items-center gap-2 mb-0.5">
-                        {col.is_primary_key && <KeyRound size={10} className="text-amber-500 flex-shrink-0" title="Primary Key"/>}
-                        {col.is_pii && <ShieldAlert size={10} className="text-red-500 flex-shrink-0" title={`PII: ${col.pii_type || 'detected'}`}/>}
-                        <span className="text-[11px] font-mono text-slate-200 truncate">{col.column_name}</span>
-                        <span className="text-[9px] text-slate-600 font-mono">{col.data_type}</span>
-                      </div>
-                      {col.description && <div className="text-[10px] text-slate-500 line-clamp-1">{col.description}</div>}
-                      <div className="flex items-center gap-1.5 mt-1">
-                        {col.classification && (
-                          <span className="text-[8.5px] px-1 py-0 rounded bg-slate-800 text-slate-400 font-mono">{col.classification}</span>
-                        )}
-                        {col.pii_type && (
-                          <span className="text-[8.5px] px-1 py-0 rounded bg-red-950/50 text-red-300 font-mono">{col.pii_type}</span>
-                        )}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+
+            {/* Columns table */}
+            <div className="flex-shrink-0 border-b border-slate-800 max-h-72 overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-900/60 sticky top-0">
+                  <tr className="text-[11px] uppercase tracking-wider text-slate-500">
+                    <th className="text-left px-6 py-2 font-medium">Column</th>
+                    <th className="text-left px-3 py-2 font-medium">Type</th>
+                    <th className="text-left px-3 py-2 font-medium">Flags</th>
+                    <th className="text-left px-3 py-2 font-medium">Classification</th>
+                    <th className="text-left px-3 py-2 font-medium w-1/3">Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {columns.map(col => {
+                    const isSelected = selectedColumn?.id === col.id;
+                    return (
+                      <tr key={col.id} onClick={() => setSelectedColumn(col)}
+                        className={`border-t border-slate-800/40 cursor-pointer transition-colors ${
+                          isSelected ? 'bg-slate-800/60' : 'hover:bg-slate-800/30'
+                        }`}>
+                        <td className="px-6 py-2 font-mono text-slate-100 text-xs">{col.column_name}</td>
+                        <td className="px-3 py-2 font-mono text-slate-500 text-xs">{col.data_type || '—'}</td>
+                        <td className="px-3 py-2">
+                          <div className="flex items-center gap-1.5">
+                            {col.is_primary_key && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-950/50 text-amber-300 font-mono" title="Primary Key">PK</span>}
+                            {col.is_pii && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-950/50 text-red-300 font-mono" title={`PII: ${col.pii_type || 'detected'}`}>PII</span>}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 text-xs text-slate-400 font-mono">{col.classification || '—'}</td>
+                        <td className="px-3 py-2 text-xs text-slate-500 truncate">{col.description || ''}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
 
             {/* Lineage visualization for selected column */}
-            {selectedColumn && (
-              <div className="p-4">
-                {/* Column header */}
-                <div className="mb-4 p-3 rounded-lg border border-slate-700 bg-slate-800/40">
-                  <div className="flex items-center gap-2 mb-1">
-                    {selectedColumn.is_primary_key && <KeyRound size={11} className="text-amber-500"/>}
-                    {selectedColumn.is_pii && <ShieldAlert size={11} className="text-red-500"/>}
-                    <span className="text-sm font-mono text-slate-100">{selectedAsset.file_name.split('.').pop()}.{selectedColumn.column_name}</span>
-                    <span className="text-[10px] text-slate-500 font-mono">({selectedColumn.data_type})</span>
-                  </div>
-                  {selectedColumn.description && <div className="text-[11px] text-slate-400 mb-1.5">{selectedColumn.description}</div>}
-                  {impact && impact.impacted_columns > 0 && (
-                    <div className="text-[10px] text-amber-400/90 flex items-center gap-1.5">
-                      <AlertTriangle size={10}/>
-                      <span><span className="font-semibold">Impact:</span> {impact.impacted_columns} downstream columns across {impact.impacted_assets} assets ({impact.max_depth} hops max).</span>
-                      <button onClick={() => setShowImpact(!showImpact)} className="ml-auto text-slate-400 hover:text-slate-200 underline">
-                        {showImpact ? 'hide details' : 'view impact'}
-                      </button>
-                    </div>
-                  )}
+            <div className="flex-1 overflow-y-auto">
+              {!selectedColumn ? (
+                <div className="flex-1 flex items-center justify-center text-sm text-slate-500 py-12">
+                  Select a column above to view its lineage.
                 </div>
-
-                {loadingLineage ? (
-                  <div className="flex items-center justify-center py-8 text-slate-500 text-xs"><Spinner size={16}/><span className="ml-2">Computing lineage...</span></div>
-                ) : (
-                  <div className="grid grid-cols-2 gap-4">
-                    {/* Upstream */}
-                    <div>
-                      <div className="flex items-center gap-2 mb-2 text-[10.5px] uppercase tracking-wider text-slate-500">
-                        <ArrowLeft size={11} className="text-slate-400"/>
-                        Upstream <span className="text-slate-600 normal-case">— where this came from</span>
-                        <span className="ml-auto text-slate-600 font-mono normal-case">{upstream.length} edges</span>
-                      </div>
-                      {upstream.length === 0 ? (
-                        <div className="text-[10.5px] text-slate-600 italic p-3 border border-dashed border-slate-800 rounded">
-                          No upstream lineage — this column is a source / root.
-                        </div>
-                      ) : (
-                        <LineageEdgeList edges={upstream} direction="upstream"/>
-                      )}
-                    </div>
-                    {/* Downstream */}
-                    <div>
-                      <div className="flex items-center gap-2 mb-2 text-[10.5px] uppercase tracking-wider text-slate-500">
-                        <ArrowRight size={11} className="text-slate-400"/>
-                        Downstream <span className="text-slate-600 normal-case">— what depends on this</span>
-                        <span className="ml-auto text-slate-600 font-mono normal-case">{downstream.length} edges</span>
-                      </div>
-                      {downstream.length === 0 ? (
-                        <div className="text-[10.5px] text-slate-600 italic p-3 border border-dashed border-slate-800 rounded">
-                          No downstream consumers — this column is a leaf / final output.
-                        </div>
-                      ) : (
-                        <LineageEdgeList edges={downstream} direction="downstream"/>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Impact details panel */}
-                {showImpact && impact && impact.details.length > 0 && (
-                  <div className="mt-4 p-3 rounded-lg border border-amber-900/40 bg-amber-950/10">
-                    <div className="text-[11px] font-semibold text-amber-300 mb-2 flex items-center gap-1.5">
-                      <AlertTriangle size={11}/>Downstream Impact Analysis
-                    </div>
-                    <div className="text-[10px] text-slate-400 mb-2">
-                      If <span className="font-mono text-slate-200">{selectedColumn.column_name}</span> is dropped or renamed, these downstream columns will break:
-                    </div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {impact.details.map((e, i) => (
-                        <div key={i} className="text-[10px] p-1.5 rounded bg-slate-900/50 border border-slate-800/60 flex items-center gap-2">
-                          <span className="text-[8.5px] px-1 py-0 rounded bg-slate-800 text-slate-500 font-mono">hop {e.hop}</span>
-                          <span className="font-mono text-slate-300 truncate">{e.downstream_asset.split('.').pop()}.{e.downstream_column}</span>
-                          <span className="ml-auto text-[8.5px] px-1 rounded bg-slate-800 text-slate-500 font-mono">{e.transformation_type}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+              ) : (
+                <div className="p-6">
+                  <LineageFlow
+                    selectedAsset={selectedAsset}
+                    selectedColumn={selectedColumn}
+                    upstream={upstream}
+                    downstream={downstream}
+                    impact={impact}
+                    loading={loadingLineage}
+                  />
+                </div>
+              )}
+            </div>
+          </>
         )}
       </div>
+    </div>
+  );
+}
 
-      {/* RIGHT PANE — Discovery Sources */}
-      <div className="w-72 flex-shrink-0 border-l border-slate-800 bg-slate-900/50 overflow-y-auto p-4 space-y-4">
-        <div>
-          <div className="text-[10.5px] uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1">
-            <Sparkles size={11}/>Discovery Sources
+// ── Empty state when no asset selected ──────────────────────────────────────
+function EmptyState({ stats }) {
+  return (
+    <div className="flex-1 flex items-center justify-center p-8">
+      <div className="text-center max-w-sm">
+        <GitMerge size={40} className="text-slate-700 mx-auto mb-4"/>
+        <div className="text-base text-slate-300 font-medium mb-1">Column Lineage</div>
+        <p className="text-sm text-slate-500 leading-relaxed mb-6">
+          Select an asset on the left to view its columns and trace lineage.
+        </p>
+        <div className="grid grid-cols-3 gap-3 text-sm">
+          <div className="text-center">
+            <div className="text-2xl font-light text-slate-300">{stats.assets_with_columns}</div>
+            <div className="text-[11px] text-slate-600 mt-1">Assets</div>
           </div>
-          <div className="text-[10.5px] text-slate-500 leading-relaxed mb-2">
-            Column metadata and lineage are populated automatically whenever a connector scans a source.
-            No separate import step.
+          <div className="text-center">
+            <div className="text-2xl font-light text-slate-300">{stats.columns}</div>
+            <div className="text-[11px] text-slate-600 mt-1">Columns</div>
           </div>
-          <div className="space-y-1.5 text-[10.5px]">
-            <div className="p-2 rounded border border-slate-800 bg-slate-900/40">
-              <div className="text-slate-200 font-medium">SQL Database Scan</div>
-              <div className="text-slate-500 text-[10px]">MySQL / Postgres connectors extract columns from <span className="font-mono">INFORMATION_SCHEMA</span> and capture FK references as column-level edges.</div>
-              <Link to="/connectors" className="mt-1 text-[10px] text-slate-400 hover:text-slate-200 flex items-center gap-1 inline-flex">
-                <ExternalLink size={10}/>Configure connector
-              </Link>
-            </div>
-            <div className="p-2 rounded border border-slate-800 bg-slate-900/40">
-              <div className="text-slate-200 font-medium">dbt Project Ingest</div>
-              <div className="text-slate-500 text-[10px]">Upload <span className="font-mono">manifest.json</span> to capture transformations across sources, staging, and marts.</div>
-              <button className="mt-1 text-[10px] text-slate-400 hover:text-slate-200 flex items-center gap-1"
-                onClick={() => alert('POST /api/lineage/dbt/ingest with { manifest, project_name } — UI uploader on the roadmap.')}>
-                <Upload size={10}/>Ingest manifest
-              </button>
-            </div>
-            <div className="p-2 rounded border border-slate-800 bg-slate-900/40 opacity-60">
-              <div className="text-slate-300 font-medium">Snowflake ACCESS_HISTORY</div>
-              <div className="text-slate-500 text-[10px]">Reconstruct column-level lineage from executed query history.</div>
-              <div className="text-[9.5px] text-slate-600 mt-0.5 italic">Roadmap</div>
-            </div>
-          </div>
-        </div>
-
-        <div className="p-2.5 rounded-lg border border-slate-800 bg-slate-900/40 text-[10.5px] text-slate-400 leading-relaxed">
-          <div className="flex items-center gap-1.5 text-slate-300 font-semibold mb-1">
-            <Info size={11}/>Why Column-Level?
-          </div>
-          <p className="mb-1">
-            Asset-level lineage (table → table) is the bare minimum.
-            <span className="text-slate-200"> Column-level</span> answers what auditors and stewards actually need:
-          </p>
-          <ul className="list-disc pl-4 text-slate-500 space-y-0.5">
-            <li>Where does this PII flow?</li>
-            <li>If a column is deprecated, what breaks?</li>
-            <li>Can we prove this number came from approved data?</li>
-          </ul>
-        </div>
-
-        <div>
-          <div className="text-[10.5px] uppercase tracking-wider text-slate-500 mb-2">Related Views</div>
-          <div className="space-y-1">
-            <Link to="/knowledge-graph" className="text-[10.5px] text-slate-400 hover:text-slate-200 flex items-center gap-1.5 p-1.5 rounded hover:bg-slate-800/40">
-              <ExternalLink size={10}/>Asset-level Knowledge Graph
-            </Link>
-            <Link to="/catalog" className="text-[10.5px] text-slate-400 hover:text-slate-200 flex items-center gap-1.5 p-1.5 rounded hover:bg-slate-800/40">
-              <ExternalLink size={10}/>Catalog (browse all assets)
-            </Link>
-            <Link to="/connectors" className="text-[10.5px] text-slate-400 hover:text-slate-200 flex items-center gap-1.5 p-1.5 rounded hover:bg-slate-800/40">
-              <ExternalLink size={10}/>Connectors (add a source)
-            </Link>
+          <div className="text-center">
+            <div className="text-2xl font-light text-slate-300">{stats.lineage_edges}</div>
+            <div className="text-[11px] text-slate-600 mt-1">Edges</div>
           </div>
         </div>
       </div>
@@ -438,56 +285,133 @@ export default function Lineage() {
   );
 }
 
-// ── Edge list renderer ───────────────────────────────────────────────────────
-function LineageEdgeList({ edges, direction }) {
-  // Group edges by hop, then by counterpart asset
-  const byHop = edges.reduce((acc, e) => {
-    (acc[e.hop] = acc[e.hop] || []).push(e);
-    return acc;
-  }, {});
-  const hops = Object.keys(byHop).sort((a, b) => parseInt(a) - parseInt(b));
+// ── Horizontal lineage flow ─────────────────────────────────────────────────
+// Three columns: Upstream | Selected | Downstream
+function LineageFlow({ selectedAsset, selectedColumn, upstream, downstream, impact, loading }) {
+  if (loading) {
+    return <div className="flex items-center justify-center py-12 text-sm text-slate-500"><Spinner size={16}/><span className="ml-2">Computing lineage...</span></div>;
+  }
+
+  // Group edges by hop to render columns of nodes
+  const upstreamByHop = groupByHop(upstream);
+  const downstreamByHop = groupByHop(downstream);
+  const upHops = Object.keys(upstreamByHop).map(Number).sort((a, b) => b - a); // furthest first
+  const downHops = Object.keys(downstreamByHop).map(Number).sort((a, b) => a - b);
 
   return (
-    <div className="space-y-2">
-      {hops.map(hop => (
-        <div key={hop}>
-          <div className="text-[9px] text-slate-600 uppercase tracking-wider mb-1 font-mono">
-            Hop {hop}
+    <div>
+      {/* Selected-column header */}
+      <div className="mb-6">
+        <div className="flex items-center gap-2 text-xs text-slate-500 mb-1">
+          <span className="font-mono">{selectedAsset.file_name}</span>
+          <ChevronRight size={11}/>
+          <span>column lineage</span>
+        </div>
+        <div className="flex items-center gap-3 mb-2">
+          <h2 className="text-lg font-mono text-slate-100">{selectedColumn.column_name}</h2>
+          <span className="text-xs text-slate-500 font-mono">{selectedColumn.data_type}</span>
+          {selectedColumn.is_primary_key && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-950/50 text-amber-300 font-mono">PK</span>}
+          {selectedColumn.is_pii && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-950/50 text-red-300 font-mono">PII</span>}
+        </div>
+        {impact && impact.impacted_columns > 0 && (
+          <div className="text-xs text-amber-400/90 flex items-center gap-1.5 mt-2">
+            <AlertTriangle size={11}/>
+            Dropping this column would affect <span className="font-semibold">{impact.impacted_columns} downstream columns</span> across <span className="font-semibold">{impact.impacted_assets} assets</span>.
           </div>
-          <div className="space-y-1">
-            {byHop[hop].map((e, i) => {
-              const counterpartAsset = direction === 'upstream' ? e.upstream_asset : e.downstream_asset;
-              const counterpartCol   = direction === 'upstream' ? e.upstream_column : e.downstream_column;
-              const counterpartLayer = direction === 'upstream' ? e.upstream_layer : e.downstream_layer;
-              const tableName = counterpartAsset?.split('.').pop() || counterpartAsset;
-              return (
-                <div key={i} className="p-2 rounded border border-slate-800 bg-slate-900/40">
-                  <div className="flex items-center gap-1.5 mb-0.5">
-                    {counterpartLayer && (
-                      <span className="text-[8.5px] px-1 py-0 rounded font-mono"
-                        style={{ background: (LAYER_COLOR[counterpartLayer] || '#475569') + '22', color: LAYER_COLOR[counterpartLayer] || '#94a3b8' }}>
-                        {counterpartLayer}
-                      </span>
-                    )}
-                    <span className="text-[10.5px] text-slate-300 font-mono truncate">{tableName}</span>
+        )}
+      </div>
+
+      {/* Three-section flow: Upstream → Selected → Downstream */}
+      <div className="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
+        {/* UPSTREAM column */}
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-2 text-right pr-2">
+            Upstream <span className="text-slate-600 font-mono">({upstream.length})</span>
+          </div>
+          {upstream.length === 0 ? (
+            <div className="text-xs text-slate-600 italic text-right pr-2 py-2">No upstream sources — root column.</div>
+          ) : (
+            <div className="space-y-3">
+              {upHops.map(hop => (
+                <div key={hop}>
+                  <div className="text-[10px] text-slate-600 mb-1 text-right pr-2 font-mono">hop {hop}</div>
+                  <div className="space-y-1.5">
+                    {upstreamByHop[hop].map((e, i) => (
+                      <LineageNode key={i} edge={e} direction="upstream"/>
+                    ))}
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[10.5px] font-mono text-slate-100">{counterpartCol}</span>
-                    <span className="text-[8.5px] px-1 rounded bg-slate-800 text-slate-500 font-mono ml-auto">
-                      {TRANSFORM_LABEL[e.transformation_type] || e.transformation_type}
-                    </span>
-                  </div>
-                  {e.transformation_sql && (
-                    <div className="text-[9.5px] text-slate-500 mt-1 p-1 rounded bg-slate-950/60 font-mono break-all">
-                      {e.transformation_sql}
-                    </div>
-                  )}
                 </div>
-              );
-            })}
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* SELECTED column (center pill) */}
+        <div className="flex flex-col items-center pt-6">
+          <div className="px-3 py-2 rounded-md border-2 border-slate-500 bg-slate-800 shadow-lg">
+            <div className="text-xs font-mono text-slate-100 whitespace-nowrap">{selectedColumn.column_name}</div>
+            <div className="text-[10px] text-slate-500 font-mono text-center mt-0.5">{selectedColumn.data_type}</div>
           </div>
         </div>
-      ))}
+
+        {/* DOWNSTREAM column */}
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-2 pl-2">
+            Downstream <span className="text-slate-600 font-mono">({downstream.length})</span>
+          </div>
+          {downstream.length === 0 ? (
+            <div className="text-xs text-slate-600 italic pl-2 py-2">No downstream consumers — leaf column.</div>
+          ) : (
+            <div className="space-y-3">
+              {downHops.map(hop => (
+                <div key={hop}>
+                  <div className="text-[10px] text-slate-600 mb-1 pl-2 font-mono">hop {hop}</div>
+                  <div className="space-y-1.5">
+                    {downstreamByHop[hop].map((e, i) => (
+                      <LineageNode key={i} edge={e} direction="downstream"/>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function groupByHop(edges) {
+  return edges.reduce((acc, e) => {
+    const h = parseInt(e.hop) || 1;
+    (acc[h] = acc[h] || []).push(e);
+    return acc;
+  }, {});
+}
+
+// ── A single lineage node (one column in upstream/downstream) ───────────────
+function LineageNode({ edge, direction }) {
+  const isUp = direction === 'upstream';
+  const asset = isUp ? edge.upstream_asset : edge.downstream_asset;
+  const col   = isUp ? edge.upstream_column : edge.downstream_column;
+  const layer = isUp ? edge.upstream_layer : edge.downstream_layer;
+  const tableName = asset?.split('.').pop() || asset;
+  const transform = TRANSFORM_LABEL[edge.transformation_type] || edge.transformation_type;
+  const layerColor = LAYER_COLOR[layer] || '#475569';
+
+  return (
+    <div className="px-2.5 py-1.5 rounded border border-slate-800 bg-slate-900/60 hover:border-slate-700 transition-colors">
+      <div className="flex items-center gap-1.5">
+        <div className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: layerColor }}/>
+        <span className="text-[10px] text-slate-500 truncate" title={asset}>{tableName}</span>
+        <span className="text-[9px] text-slate-700 font-mono ml-auto">{transform}</span>
+      </div>
+      <div className="text-xs font-mono text-slate-200 truncate" title={col}>{col}</div>
+      {edge.transformation_sql && edge.transformation_type !== 'direct' && edge.transformation_type !== 'fk_reference' && (
+        <div className="text-[10px] text-slate-500 mt-1 font-mono break-all opacity-70" title={edge.transformation_sql}>
+          {edge.transformation_sql.length > 60 ? edge.transformation_sql.slice(0, 57) + '…' : edge.transformation_sql}
+        </div>
+      )}
     </div>
   );
 }
