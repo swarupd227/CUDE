@@ -151,6 +151,23 @@ async function start() {
   try {
     const graphService = require('./src/services/graphService');
     neo4jConnected = await graphService.init();
+    // Reconcile Neo4j with PostgreSQL on startup — remove stale nodes + rebuild if empty
+    if (neo4jConnected && USE_DATABASE) {
+      try {
+        const { query } = require('./src/db/pool');
+        const result = await query('SELECT id FROM assets');
+        const activeIds = new Set(result.rows.map(r => r.id));
+        const reconcileResult = await graphService.reconcileWithCatalog(activeIds);
+        // If Neo4j has zero active assets but PostgreSQL has assets, rebuild from PostgreSQL
+        const remaining = (reconcileResult.total || 0) - (reconcileResult.removed || 0);
+        if (remaining === 0 && activeIds.size > 0) {
+          console.log(`🔧  Neo4j is empty but PostgreSQL has ${activeIds.size} assets — rebuilding...`);
+          await graphService.rebuildFromPostgres();
+        }
+      } catch (e) {
+        console.log('⚠️  Neo4j reconciliation skipped:', e.message);
+      }
+    }
   } catch (_) {}
 
   // Initialize pgvector embeddings

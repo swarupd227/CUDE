@@ -3,10 +3,13 @@
 
 let driver = null;
 let available = false;
+const neo4j = require('neo4j-driver');
+
+// Convert JS number to Neo4j integer (required for LIMIT, depth, etc.)
+const neoInt = (n) => neo4j.int(parseInt(n) || 0);
 
 async function init() {
   try {
-    const neo4j = require('neo4j-driver');
     const url = process.env.NEO4J_URL || 'bolt://localhost:7687';
     const password = process.env.NEO4J_PASSWORD || 'cude_graph_pass';
     driver = neo4j.driver(url, neo4j.auth.basic('neo4j', password));
@@ -92,26 +95,42 @@ async function autoCreateProjectEdges(asset) {
   } catch (_) {} finally { await session.close(); }
 }
 
-async function getProjectGraph(projectCode, limit = 50) {
+async function getProjectGraph(projectCode, limit = 500, activeAssetIds = null) {
   if (!available) return null;
   const session = driver.session();
   try {
-    const result = await session.run(
-      `MATCH (a:Asset {projectCode: $projectCode})-[r]-(b:Asset)
-       WHERE NOT type(r) IN ['SAME_PROJECT', 'BELONGS_TO']
-       RETURN a, type(r) as relType, r.confidence as confidence, b
-       LIMIT $limit`,
-      { projectCode, limit: parseInt(limit) }
-    );
+    // Query for nodes matching project (if specified) OR all if no project
+    // Cross-check with activeAssetIds set (from PostgreSQL) to filter stale nodes
+    const nodesQuery = projectCode
+      ? `MATCH (a:Asset {projectCode: $projectCode}) RETURN a LIMIT $limit`
+      : `MATCH (a:Asset) RETURN a LIMIT $limit`;
+    const nodesResult = await session.run(nodesQuery, { projectCode, limit: neoInt(limit) });
 
     const nodesMap = {};
-    const edges = [];
-    for (const record of result.records) {
+    for (const record of nodesResult.records) {
       const a = record.get('a').properties;
-      const b = record.get('b').properties;
+      // Skip stale nodes if we have an active asset list
+      if (activeAssetIds && !activeAssetIds.has(a.id)) continue;
       nodesMap[a.id] = { id: a.id, label: a.fileName?.length > 28 ? a.fileName.substring(0,25)+'...' : a.fileName, full_name: a.fileName, domain: a.domain, classification: a.classification, zone: a.zone, confidence: a.confidence, project: a.projectCode };
-      nodesMap[b.id] = { id: b.id, label: b.fileName?.length > 28 ? b.fileName.substring(0,25)+'...' : b.fileName, full_name: b.fileName, domain: b.domain, classification: b.classification, zone: b.zone, confidence: b.confidence, project: b.projectCode };
-      edges.push({ source: a.id, target: b.id, relationship: record.get('relType'), confidence: record.get('confidence') });
+    }
+
+    // Now get edges between those nodes (semantic only)
+    const nodeIds = Object.keys(nodesMap);
+    const edges = [];
+    if (nodeIds.length > 0) {
+      const edgesResult = await session.run(
+        `MATCH (a:Asset)-[r]->(b:Asset)
+         WHERE a.id IN $nodeIds AND b.id IN $nodeIds
+         AND NOT type(r) IN ['SAME_PROJECT', 'BELONGS_TO']
+         RETURN a.id as source, b.id as target, type(r) as relType, r.confidence as confidence`,
+        { nodeIds }
+      );
+      for (const record of edgesResult.records) {
+        edges.push({
+          source: record.get('source'), target: record.get('target'),
+          relationship: record.get('relType'), confidence: record.get('confidence'),
+        });
+      }
     }
 
     return { nodes: Object.values(nodesMap), edges };
@@ -224,7 +243,7 @@ async function getNeighbors(assetId, depth = 1, limit = 50) {
               neighbor.confidence as confidence, neighbor.projectCode as project, distance
        ORDER BY distance ASC, neighbor.fileName ASC
        LIMIT $limit`,
-      { assetId, limit: parseInt(limit) }
+      { assetId, limit: neoInt(limit) }
     );
     return result.records.map(r => ({
       id: r.get('id'), name: r.get('name'), domain: r.get('domain'),
@@ -253,7 +272,7 @@ async function getMostConnectedAssets(limit = 10) {
               degree, relTypes
        ORDER BY degree DESC
        LIMIT $limit`,
-      { limit: parseInt(limit) }
+      { limit: neoInt(limit) }
     );
     return result.records.map(r => ({
       id: r.get('id'), name: r.get('name'), domain: r.get('domain'),
@@ -331,7 +350,10 @@ async function getGraphStatistics() {
     // Orphans — assets with no SEMANTIC relationships
     const orphans = await session.run(
       `MATCH (a:Asset)
-       WHERE NOT (a)-[r]-(:Asset) OR ALL(r IN [(a)-[rel]-(:Asset) | rel] WHERE type(r) IN ['SAME_PROJECT', 'BELONGS_TO'])
+       OPTIONAL MATCH (a)-[r]-(:Asset)
+       WHERE r IS NOT NULL AND NOT type(r) IN ['SAME_PROJECT', 'BELONGS_TO']
+       WITH a, count(r) as semCount
+       WHERE semCount = 0
        RETURN count(a) as c`
     );
     stats.orphanedNodes = toNum(orphans.records[0]?.get('c'));
@@ -372,7 +394,7 @@ async function getOrphanedAssets(limit = 50) {
        RETURN a.id as id, a.fileName as name, a.domain as domain,
               a.classification as classification, a.projectCode as project
        LIMIT $limit`,
-      { limit: parseInt(limit) }
+      { limit: neoInt(limit) }
     );
     return result.records.map(r => ({
       id: r.get('id'), name: r.get('name'), domain: r.get('domain'),
@@ -391,7 +413,7 @@ async function getOrphanedAssets(limit = 50) {
          RETURN a.id as id, a.fileName as name, a.domain as domain,
                 a.classification as classification, a.projectCode as project
          LIMIT $limit`,
-        { limit: parseInt(limit) }
+        { limit: neoInt(limit) }
       );
       const res = result2.records.map(r => ({
         id: r.get('id'), name: r.get('name'), domain: r.get('domain'),
@@ -438,6 +460,114 @@ async function getImpactAnalysis(assetId, maxDepth = 3) {
   } finally { await session.close(); }
 }
 
+// Rebuild Neo4j from PostgreSQL — used after reconciliation when Neo4j is empty
+async function rebuildFromPostgres() {
+  if (!available) return { added: 0 };
+  const session = driver.session();
+  try {
+    const { query } = require('../db/pool');
+    // Load all active assets
+    const assetsResult = await query(
+      `SELECT id, file_name, content_domain, data_classification, classification_zone,
+              project_code, asset_format, classification_confidence
+       FROM assets`
+    );
+    let nodesAdded = 0;
+    for (const a of assetsResult.rows) {
+      try {
+        await session.run(
+          `MERGE (n:Asset {id: $id})
+           SET n.fileName = $fileName, n.domain = $domain, n.classification = $classification,
+               n.zone = $zone, n.projectCode = $projectCode, n.format = $format,
+               n.confidence = $confidence, n.updatedAt = datetime()`,
+          {
+            id: a.id, fileName: a.file_name, domain: a.content_domain,
+            classification: a.data_classification, zone: a.classification_zone,
+            projectCode: a.project_code || '', format: a.asset_format || '',
+            confidence: parseFloat(a.classification_confidence) || 0,
+          }
+        );
+        // Project edge
+        if (a.project_code) {
+          await session.run(
+            `MERGE (p:Project {code: $code})
+             WITH p
+             MATCH (n:Asset {id: $assetId})
+             MERGE (n)-[:BELONGS_TO]->(p)`,
+            { code: a.project_code, assetId: a.id }
+          );
+        }
+        nodesAdded++;
+      } catch (_) {}
+    }
+
+    // Load all relationships
+    const relsResult = await query(
+      `SELECT source_asset_id, target_asset_id, relationship_type, confidence, evidence
+       FROM asset_relationships`
+    );
+    let edgesAdded = 0;
+    for (const r of relsResult.rows) {
+      try {
+        const safeType = (r.relationship_type || 'RELATED').replace(/[^A-Z_]/g, '');
+        await session.run(
+          `MATCH (s:Asset {id: $sourceId}), (t:Asset {id: $targetId})
+           MERGE (s)-[rel:${safeType}]->(t)
+           SET rel.confidence = $confidence, rel.evidence = $evidence`,
+          {
+            sourceId: r.source_asset_id, targetId: r.target_asset_id,
+            confidence: parseFloat(r.confidence) || 0.5,
+            evidence: typeof r.evidence === 'string' ? r.evidence : JSON.stringify(r.evidence || {}),
+          }
+        );
+        edgesAdded++;
+      } catch (_) {}
+    }
+
+    console.log(`🔧  Neo4j rebuild: ${nodesAdded} nodes + ${edgesAdded} relationships restored from PostgreSQL`);
+    return { added: nodesAdded, edgesAdded };
+  } catch (e) {
+    console.error('Neo4j rebuild error:', e.message);
+    return { added: 0, error: e.message };
+  } finally { await session.close(); }
+}
+
+// Reconcile Neo4j with PostgreSQL — remove stale nodes that no longer exist in catalog
+// Should be called on startup and after large operations
+async function reconcileWithCatalog(activeAssetIds) {
+  if (!available) return { removed: 0 };
+  if (!activeAssetIds || activeAssetIds.size === 0) {
+    console.log('⚠️  Skipping Neo4j reconciliation — no active assets provided');
+    return { removed: 0 };
+  }
+  const session = driver.session();
+  try {
+    // Get all Neo4j Asset node IDs
+    const result = await session.run('MATCH (a:Asset) RETURN a.id as id');
+    const neo4jIds = result.records.map(r => r.get('id'));
+    const staleIds = neo4jIds.filter(id => !activeAssetIds.has(id));
+
+    if (staleIds.length === 0) {
+      console.log(`✅  Neo4j is in sync with PostgreSQL (${neo4jIds.length} assets)`);
+      return { removed: 0, total: neo4jIds.length };
+    }
+
+    // Delete stale nodes in batches of 100
+    let removed = 0;
+    for (let i = 0; i < staleIds.length; i += 100) {
+      const batch = staleIds.slice(i, i + 100);
+      await session.run('UNWIND $ids as id MATCH (a:Asset {id: id}) DETACH DELETE a', { ids: batch });
+      removed += batch.length;
+    }
+
+    console.log(`🧹  Neo4j reconciliation: removed ${removed} stale nodes (kept ${neo4jIds.length - removed} active)`);
+    return { removed, total: neo4jIds.length };
+  } catch (e) {
+    console.error('Neo4j reconciliation error:', e.message);
+    return { removed: 0, error: e.message };
+  } finally { await session.close(); }
+}
+
 // Delete an asset node and all its relationships from Neo4j
 async function deleteAssetNode(assetId) {
   if (!available) return;
@@ -468,6 +598,6 @@ module.exports = {
   getProjectGraph, getAssetRelationships, upsertConceptNode, linkAssetToConcept,
   findShortestPath, getNeighbors, getMostConnectedAssets, findAllPaths,
   getGraphStatistics, getOrphanedAssets, getImpactAnalysis,
-  deleteAssetNode, deleteProjectAssets,
+  deleteAssetNode, deleteProjectAssets, reconcileWithCatalog, rebuildFromPostgres,
   close, isAvailable
 };

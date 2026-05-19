@@ -116,7 +116,7 @@ export default function Investigation() {
         for (const [t, c] of Object.entries(f.relationshipTypes)) { if (!STRUCTURAL.has(t)) { clean[t] = c; sem += c; } }
         f.relationshipTypes = clean; f.edgeCount = sem;
       }
-      if (graphData?.nodes?.length) f.nodeCount = graphData.nodes.length;
+      // Use the API's nodeCount (true asset count from Neo4j/PostgreSQL) — don't override with graphData (which is the visible subset)
       const n = f.nodeCount || 1;
       f.density = n > 1 ? parseFloat(((2 * f.edgeCount) / (n * (n - 1))).toFixed(4)) : 0;
       f.avgDegree = n > 0 ? parseFloat(((2 * f.edgeCount) / n).toFixed(2)) : 0;
@@ -159,6 +159,12 @@ export default function Investigation() {
     if (assetId && graphData) {
       const node = graphData.nodes?.find(n => n.id === assetId);
       if (node) setSelected(node);
+    }
+    // Filter to a specific entity type when arriving from the Ontology page
+    const domain = searchParams.get('domain');
+    if (domain) {
+      // Use the domain code (lowercased + spaces) — filteredNodes matches domain text
+      setGraphSearch(domain.replace(/_/g, ' ').toLowerCase());
     }
   }, [searchParams, graphData]);
 
@@ -328,7 +334,15 @@ export default function Investigation() {
               <div className="text-[9px] text-slate-600 uppercase tracking-wider">Most Connected Assets</div>
               {topConnected.length === 0 && <div className="text-[10px] text-slate-600">No hub assets found</div>}
               {topConnected.map(a => (
-                <button key={a.id} onClick={() => { const n = graphData?.nodes?.find(nd => nd.id === a.id); if (n) { setSelected(n); const ln = nodeMap[n.id]; if (ln) setPan({ x: -ln.x * zoom + 400, y: -ln.y * zoom + 300 }); } }}
+                <button key={a.id} onClick={() => {
+                  // Try to find in current graph first, fallback to constructing a node from hub data
+                  const existing = graphData?.nodes?.find(nd => nd.id === a.id);
+                  const node = existing || { id: a.id, label: a.name, full_name: a.name, domain: a.domain, classification: a.classification, zone: a.zone, project: a.project };
+                  setSelected(node);
+                  setInvestResult(null); setPathResult(null); setImpactResult(null);
+                  const ln = nodeMap[a.id];
+                  if (ln) setPan({ x: -ln.x * zoom + 400, y: -ln.y * zoom + 300 });
+                }}
                   className="w-full text-left p-2 rounded-lg border border-slate-800 hover:border-blue-700/40 transition-colors">
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] text-slate-300 font-medium truncate">{a.name}</span>
@@ -348,10 +362,19 @@ export default function Investigation() {
               </div>
               <div className="text-[10px] text-slate-500 mb-1">Assets with no semantic relationships.</div>
               {orphaned.map(a => (
-                <div key={a.id} className="p-2 rounded-lg border border-amber-900/30 bg-amber-950/10 text-[10px]">
+                <button key={a.id} onClick={() => {
+                  const existing = graphData?.nodes?.find(nd => nd.id === a.id);
+                  const node = existing || { id: a.id, label: a.name, full_name: a.name, domain: a.domain, classification: a.classification, zone: a.zone, project: a.project };
+                  setSelected(node);
+                  setInvestResult(null); setPathResult(null); setImpactResult(null);
+                  const ln = nodeMap[a.id];
+                  if (ln) setPan({ x: -ln.x * zoom + 400, y: -ln.y * zoom + 300 });
+                }}
+                  className="w-full text-left p-2 rounded-lg border border-amber-900/30 bg-amber-950/10 text-[10px] hover:border-amber-700/50 hover:bg-amber-950/20 transition-colors">
                   <div className="text-slate-300 font-medium truncate">{a.name}</div>
                   <div className="text-slate-600">{DOMAIN_LABELS[a.domain] || a.domain?.replace(/_/g, ' ')}</div>
-                </div>
+                  <div className="text-[9px] text-amber-500/70 mt-0.5">Click to investigate relationships</div>
+                </button>
               ))}
               {orphaned.length === 0 && <div className="text-[10px] text-green-400">All assets have relationships</div>}
             </div>
