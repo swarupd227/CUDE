@@ -41,6 +41,9 @@ async function initDatabase() {
     // Ontology v2 — hierarchy + properties + cardinality
     const migration006 = path.join(__dirname, 'migrations', '006_ontology_v2.sql');
     try { await runMigration(migration006); } catch (e) { console.log('⚠️  006 migration warning:', e.message); }
+    // Column-level lineage
+    const migration007 = path.join(__dirname, 'migrations', '007_column_lineage.sql');
+    try { await runMigration(migration007); } catch (e) { console.log('⚠️  007 migration warning:', e.message); }
     console.log('✅  Migrations complete.');
   } catch (e) {
     console.error('⚠️  Migration warning:', e.message);

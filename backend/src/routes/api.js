@@ -2202,4 +2202,83 @@ router.get('/folders/suggestions', (req, res) => {
   res.json({ home, suggestions });
 });
 
+// ── Column-Level Lineage ────────────────────────────────────────────────────
+// The #1 capability buyers (CDO / Head of Data / Data Eng Lead) evaluate.
+// Sources: dbt manifest, MySQL FK + view introspection, Snowflake ACCESS_HISTORY.
+
+router.get('/lineage/stats', async (req, res) => {
+  try {
+    const lineageService = require('../services/lineageService');
+    res.json(await lineageService.getStats());
+  } catch (e) { res.json({ columns: 0, assets_with_columns: 0, lineage_edges: 0, pii_columns: 0, error: e.message }); }
+});
+
+router.get('/lineage/assets', async (req, res) => {
+  try {
+    const lineageService = require('../services/lineageService');
+    const assets = await lineageService.listAssetsWithColumns();
+    res.json({ assets });
+  } catch (e) { res.json({ assets: [], error: e.message }); }
+});
+
+router.get('/lineage/columns/:assetId', async (req, res) => {
+  try {
+    const lineageService = require('../services/lineageService');
+    const columns = await lineageService.getColumnsForAsset(req.params.assetId);
+    res.json({ columns });
+  } catch (e) { res.json({ columns: [], error: e.message }); }
+});
+
+router.get('/lineage/column/:columnId/upstream', async (req, res) => {
+  try {
+    const lineageService = require('../services/lineageService');
+    const depth = parseInt(req.query.depth || '3', 10);
+    const edges = await lineageService.getUpstreamLineage(req.params.columnId, depth);
+    res.json({ edges });
+  } catch (e) { res.json({ edges: [], error: e.message }); }
+});
+
+router.get('/lineage/column/:columnId/downstream', async (req, res) => {
+  try {
+    const lineageService = require('../services/lineageService');
+    const depth = parseInt(req.query.depth || '3', 10);
+    const edges = await lineageService.getDownstreamLineage(req.params.columnId, depth);
+    res.json({ edges });
+  } catch (e) { res.json({ edges: [], error: e.message }); }
+});
+
+router.get('/lineage/column/:columnId/impact', async (req, res) => {
+  try {
+    const lineageService = require('../services/lineageService');
+    res.json(await lineageService.getImpactAnalysis(req.params.columnId));
+  } catch (e) { res.json({ impacted_columns: 0, impacted_assets: 0, edges: 0, max_depth: 0, details: [], error: e.message }); }
+});
+
+// Upload a real dbt manifest.json — accepts the full manifest object in body
+router.post('/lineage/dbt/ingest', async (req, res) => {
+  try {
+    const { manifest, project_name } = req.body;
+    if (!manifest || !manifest.nodes) {
+      return res.status(400).json({ error: 'Request body must contain `manifest` with a `nodes` field (dbt manifest.json)' });
+    }
+    const lineageService = require('../services/lineageService');
+    const result = await lineageService.ingestDbtManifest(manifest, project_name || 'uploaded_dbt_project');
+    res.json({ ingested: true, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Re-seed the sample projects (for demos where the data was cleared)
+router.post('/lineage/seed-samples', async (req, res) => {
+  try {
+    const lineageService = require('../services/lineageService');
+    // Force re-seed regardless of existing data
+    const { SAMPLE_PROJECTS } = require('../data/sampleLineageProjects');
+    const results = [];
+    for (const project of SAMPLE_PROJECTS) {
+      results.push(await lineageService.ingestProject(project));
+    }
+    res.json({ seeded: true, projects: results });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;

@@ -170,6 +170,28 @@ async function start() {
     }
   } catch (_) {}
 
+  // Seed sample column-level lineage (dbt-style finance + pharma projects)
+  // so the Lineage page has real content out of the box.
+  if (dbConnected) {
+    try {
+      const lineageService = require('./src/services/lineageService');
+      const seedResult = await lineageService.seedSamplesIfEmpty();
+      if (seedResult.seeded) {
+        const total = seedResult.projects.reduce(
+          (s, p) => ({
+            assets: s.assets + p.counts.assets,
+            columns: s.columns + p.counts.columns,
+            edges: s.edges + p.counts.lineage_edges,
+          }),
+          { assets: 0, columns: 0, edges: 0 }
+        );
+        console.log(`🌱  Seeded sample lineage: ${total.assets} models, ${total.columns} columns, ${total.edges} column-level edges`);
+      }
+    } catch (e) {
+      console.log('⚠️  Lineage sample seed skipped:', e.message);
+    }
+  }
+
   // Initialize pgvector embeddings
   let embeddingsAvailable = false;
   try {

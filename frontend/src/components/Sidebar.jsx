@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, FolderSearch, Upload, ClipboardCheck, Network, Shield, FileText, Settings2, Cpu, Plug, ScrollText, FolderKanban, X, Users, BookOpen, Share2, Database } from 'lucide-react';
+import { LayoutDashboard, FolderSearch, Upload, ClipboardCheck, Network, Shield, FileText, Settings2, Cpu, Plug, ScrollText, FolderKanban, X, Users, BookOpen, Share2, Database, GitMerge } from 'lucide-react';
 
 const ALL_ROLES = ['ADMIN','OWNER','STEWARD','AUDITOR','VIEWER'];
 
@@ -13,6 +13,7 @@ const NAV = [
   ]},
   { section:'Intelligence', items:[
     { to:'/knowledge-graph', icon:Share2, label:'Knowledge Graph', roles:['ADMIN','OWNER','STEWARD','AUDITOR'] },
+    { to:'/lineage', icon:GitMerge, label:'Column Lineage', roles:['ADMIN','OWNER','STEWARD','AUDITOR'] },
     { to:'/data-explorer', icon:Database, label:'Data Explorer', roles:['ADMIN','OWNER','STEWARD'] },
     { to:'/ontology', icon:Network, label:'Ontology Schema', roles:['ADMIN','OWNER'] },
     { to:'/connectors', icon:Plug, label:'Connector Library', roles:['ADMIN','OWNER'] },

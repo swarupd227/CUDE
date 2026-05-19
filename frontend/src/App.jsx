@@ -20,6 +20,7 @@ import Login from './pages/Login';
 import Glossary from './pages/Glossary';
 import OntologySchema from './pages/OntologySchema';
 import DataExplorer from './pages/DataExplorer';
+import Lineage from './pages/Lineage';
 
 function AppContent() {
   const { isAuthenticated, loading, user, logout } = useAuth();
@@ -75,6 +76,7 @@ function AppContent() {
           <Route path="/glossary"    element={<Glossary/>}/>
           <Route path="/ontology"    element={<OntologySchema/>}/>
           <Route path="/data-explorer" element={<DataExplorer/>}/>
+          <Route path="/lineage"     element={<Lineage/>}/>
           <Route path="/governance"  element={<Governance/>}/>
           <Route path="/reports"     element={<Reports/>}/>
           <Route path="/settings"    element={<Settings/>}/>
