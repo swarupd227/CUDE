@@ -211,7 +211,7 @@ async function getUpstreamLineage(columnId, depth = 3) {
      SELECT u.*,
             uc.column_name AS upstream_column, uc.data_type AS upstream_type,
             ua.id AS upstream_asset_id, ua.file_name AS upstream_asset,
-            ua.domain_metadata->>'dbt_layer' AS upstream_layer,
+            COALESCE(ua.domain_metadata->>'lineage_layer', ua.domain_metadata->>'dbt_layer') AS upstream_layer,
             dc.column_name AS downstream_column,
             da.id AS downstream_asset_id, da.file_name AS downstream_asset
      FROM upstream u
@@ -246,7 +246,7 @@ async function getDownstreamLineage(columnId, depth = 3) {
             ua.id AS upstream_asset_id, ua.file_name AS upstream_asset,
             dc.column_name AS downstream_column, dc.data_type AS downstream_type,
             da.id AS downstream_asset_id, da.file_name AS downstream_asset,
-            da.domain_metadata->>'dbt_layer' AS downstream_layer
+            COALESCE(da.domain_metadata->>'lineage_layer', da.domain_metadata->>'dbt_layer') AS downstream_layer
      FROM downstream d
      JOIN asset_columns uc ON d.upstream_column_id = uc.id
      JOIN assets ua ON uc.asset_id = ua.id
@@ -288,32 +288,21 @@ async function getStats() {
   };
 }
 
-async function seedSamplesIfEmpty() {
-  const stats = await getStats();
-  if (stats.columns > 0) return { skipped: true, reason: `${stats.columns} columns already present` };
-
-  const { SAMPLE_PROJECTS } = require('../data/sampleLineageProjects');
-  const results = [];
-  for (const project of SAMPLE_PROJECTS) {
-    try { results.push(await ingestProject(project)); } catch (e) {
-      console.log(`⚠️  Sample lineage seed (${project.project_name}) failed:`, e.message);
-    }
-  }
-  return { seeded: true, projects: results };
-}
-
 async function listAssetsWithColumns() {
+  // Lineage project / layer can be set by any ingestor — dbt manifest uses
+  // dbt_project/dbt_layer, SQL scans use lineage_project/lineage_layer.
+  // Fall back to source_connector if neither is set.
   const r = await dbQuery(`
-    SELECT a.id, a.file_name, a.content_domain,
-           a.domain_metadata->>'dbt_layer' AS layer,
-           a.domain_metadata->>'dbt_project' AS project,
+    SELECT a.id, a.file_name, a.content_domain, a.source_connector,
+           COALESCE(a.domain_metadata->>'lineage_layer',   a.domain_metadata->>'dbt_layer')   AS layer,
+           COALESCE(a.domain_metadata->>'lineage_project', a.domain_metadata->>'dbt_project', a.source_connector) AS project,
            a.domain_metadata->>'industry' AS industry,
            COUNT(c.id) AS column_count,
            SUM(CASE WHEN c.is_pii THEN 1 ELSE 0 END) AS pii_count
     FROM assets a
     JOIN asset_columns c ON c.asset_id = a.id
     GROUP BY a.id
-    ORDER BY a.domain_metadata->>'dbt_project', a.domain_metadata->>'dbt_layer', a.file_name
+    ORDER BY project, layer NULLS LAST, a.file_name
   `);
   return r.rows;
 }
@@ -407,6 +396,5 @@ module.exports = {
   getDownstreamLineage,
   getImpactAnalysis,
   getStats,
-  seedSamplesIfEmpty,
   listAssetsWithColumns,
 };

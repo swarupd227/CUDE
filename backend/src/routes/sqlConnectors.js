@@ -120,6 +120,10 @@ router.post('/scan', async (req, res) => {
             uniqueness: quality.uniqueness,
             freshness: quality.freshness,
           },
+          // For Column Lineage grouping
+          lineage_project: config.database,
+          lineage_layer: table.type === 'fact' ? 'mart' : table.type === 'dimension' ? 'staging' : 'source',
+          lineage_schema: 'mysql',
         },
         quality_score: (quality.completeness + quality.uniqueness + quality.freshness) / 300,
       };

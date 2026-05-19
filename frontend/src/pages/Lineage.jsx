@@ -3,7 +3,7 @@ import { useSearchParams, Link } from 'react-router-dom';
 import {
   GitMerge, Search, Database, Layers, KeyRound, ShieldAlert,
   ArrowRight, ArrowLeft, AlertTriangle, ChevronRight, ChevronDown, Upload,
-  RefreshCw, ExternalLink, Sparkles, Info,
+  ExternalLink, Sparkles, Info,
 } from 'lucide-react';
 import { Spinner } from '../components/UI';
 
@@ -37,7 +37,6 @@ export default function Lineage() {
   const [loadingLineage, setLoadingLineage] = useState(false);
   const [depth, setDepth] = useState(3);
   const [search, setSearch] = useState('');
-  const [reseedingState, setReseedingState] = useState(null);
   const [showImpact, setShowImpact] = useState(false);
 
   const loadStats = async () => {
@@ -113,16 +112,6 @@ export default function Lineage() {
     return byProject;
   }, [assets, search]);
 
-  const reseed = async () => {
-    setReseedingState('reseeding');
-    try {
-      await fetch(`${API}/lineage/seed-samples`, { method: 'POST' });
-      await Promise.all([loadStats(), loadAssets()]);
-      setReseedingState('done');
-      setTimeout(() => setReseedingState(null), 1500);
-    } catch { setReseedingState(null); }
-  };
-
   if (loading) return (
     <div className="p-6 flex items-center justify-center h-full">
       <Spinner size={24}/><span className="ml-3 text-slate-500">Loading column lineage...</span>
@@ -151,8 +140,8 @@ export default function Lineage() {
         <div className="flex-1 overflow-y-auto p-1.5">
           {Object.keys(groupedAssets).length === 0 ? (
             <div className="text-[10px] text-slate-600 p-3 text-center">
-              No models indexed yet.<br/>
-              <button onClick={reseed} className="text-slate-400 hover:text-slate-200 underline mt-2">Load sample dbt projects</button>
+              No assets with columns yet.<br/>
+              <span className="text-slate-500 mt-2 block">Scan a database via the <Link to="/connectors" className="text-slate-400 hover:text-slate-200 underline">Connectors</Link> page — column metadata and lineage will appear here automatically.</span>
             </div>
           ) : Object.entries(groupedAssets).map(([project, layers]) => (
             <div key={project} className="mb-3">
@@ -199,13 +188,6 @@ export default function Lineage() {
           ))}
         </div>
 
-        <div className="p-2 border-t border-slate-800 flex-shrink-0 space-y-1">
-          <button onClick={reseed} disabled={reseedingState === 'reseeding'}
-            className="w-full text-[10px] py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center justify-center gap-1 disabled:opacity-50">
-            <RefreshCw size={10} className={reseedingState === 'reseeding' ? 'animate-spin' : ''}/>
-            {reseedingState === 'done' ? 'Reseeded ✓' : reseedingState === 'reseeding' ? 'Reseeding...' : 'Reseed Samples'}
-          </button>
-        </div>
       </div>
 
       {/* CENTER PANE — Columns + Lineage */}

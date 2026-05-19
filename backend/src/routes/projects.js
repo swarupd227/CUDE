@@ -97,6 +97,14 @@ router.delete('/:id', requireAuth, async (req, res) => {
     await dbQuery('DELETE FROM asset_relationships WHERE project_id = $1', [req.params.id]);
     await dbQuery('DELETE FROM approval_queue WHERE project_id = $1', [req.params.id]);
     await dbQuery('DELETE FROM classification_decisions WHERE asset_id IN (SELECT id FROM assets WHERE project_id = $1)', [req.params.id]);
+    // Column-level lineage and column metadata before assets (cascades would handle it,
+    // but explicit for traceability)
+    await dbQuery(`
+      DELETE FROM column_lineage
+      WHERE upstream_column_id   IN (SELECT id FROM asset_columns WHERE asset_id IN (SELECT id FROM assets WHERE project_id = $1))
+         OR downstream_column_id IN (SELECT id FROM asset_columns WHERE asset_id IN (SELECT id FROM assets WHERE project_id = $1))`,
+      [req.params.id]);
+    await dbQuery('DELETE FROM asset_columns WHERE asset_id IN (SELECT id FROM assets WHERE project_id = $1)', [req.params.id]);
     await dbQuery('DELETE FROM assets WHERE project_id = $1', [req.params.id]);
     await dbQuery('DELETE FROM connectors WHERE project_id = $1', [req.params.id]);
     await dbQuery('DELETE FROM policy_rules WHERE project_id = $1', [req.params.id]);
@@ -174,9 +182,19 @@ router.delete('/:id/assets/clear', requireAuth, async (req, res) => {
     const assetIdsResult = await dbQuery('SELECT id FROM assets WHERE project_id = $1', [req.params.id]);
     const assetIds = assetIdsResult.rows.map(r => r.id);
 
-    // Delete in order — approval queue items first, then assets
+    // Delete in order — approval queue first, then column lineage, then asset_columns,
+    // then relationships, then the assets themselves.
     await dbQuery('DELETE FROM approval_queue WHERE asset_id IN (SELECT id FROM assets WHERE project_id = $1)', [req.params.id]);
     await dbQuery('DELETE FROM classification_decisions WHERE asset_id IN (SELECT id FROM assets WHERE project_id = $1)', [req.params.id]);
+    // Column-level lineage edges that touch any column of any asset in this project
+    await dbQuery(`
+      DELETE FROM column_lineage
+      WHERE upstream_column_id   IN (SELECT id FROM asset_columns WHERE asset_id IN (SELECT id FROM assets WHERE project_id = $1))
+         OR downstream_column_id IN (SELECT id FROM asset_columns WHERE asset_id IN (SELECT id FROM assets WHERE project_id = $1))`,
+      [req.params.id]);
+    // Column metadata (asset_columns has ON DELETE CASCADE on asset_id, but explicit
+    // for clarity and to keep the delete order traceable)
+    await dbQuery('DELETE FROM asset_columns WHERE asset_id IN (SELECT id FROM assets WHERE project_id = $1)', [req.params.id]);
     await dbQuery('DELETE FROM asset_relationships WHERE source_asset_id IN (SELECT id FROM assets WHERE project_id = $1) OR target_asset_id IN (SELECT id FROM assets WHERE project_id = $1)', [req.params.id]);
     await dbQuery('DELETE FROM assets WHERE project_id = $1', [req.params.id]);
 

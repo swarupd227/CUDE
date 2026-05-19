@@ -2267,18 +2267,4 @@ router.post('/lineage/dbt/ingest', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Re-seed the sample projects (for demos where the data was cleared)
-router.post('/lineage/seed-samples', async (req, res) => {
-  try {
-    const lineageService = require('../services/lineageService');
-    // Force re-seed regardless of existing data
-    const { SAMPLE_PROJECTS } = require('../data/sampleLineageProjects');
-    const results = [];
-    for (const project of SAMPLE_PROJECTS) {
-      results.push(await lineageService.ingestProject(project));
-    }
-    res.json({ seeded: true, projects: results });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 module.exports = router;
