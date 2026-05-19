@@ -17,9 +17,9 @@ jobs:
       - name: Log in to ACR
         uses: docker/login-action@v3
         with:
-          registry: ${{ secrets.acrdemocontainer.azurecr.io }}
-          username: ${{ secrets.acrdemocontainer }}
-          password: ${{ secrets.Dj6VUvQ3P7KyJOgBmtM4wCNaoH6n4WWSptMvKHBSgPlUxIZ4BhpXJQQJ99CEACqBBLyEqg7NAAACAZCRmo4W }}
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -27,4 +27,3 @@ jobs:
           context: .
           push: true
           tags: ${{ secrets.ACR_LOGIN_SERVER }}/cude:latest
-
