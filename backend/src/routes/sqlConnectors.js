@@ -132,6 +132,13 @@ router.post('/scan', async (req, res) => {
         await assetRepo.create(asset);
       } catch (_) {}
 
+      // Persist columns for Column-Level Lineage — every SQL scan automatically
+      // populates the Lineage page so it's not a separate upload step.
+      try {
+        const lineageService = require('../services/lineageService');
+        await lineageService.ingestDiscoveredTable(asset.id, table.columns || [], { source: 'mysql_introspection' });
+      } catch (_) {}
+
       // Add to Neo4j
       try {
         const graphService = require('../services/graphService');
@@ -163,6 +170,11 @@ router.post('/scan', async (req, res) => {
                JSON.stringify({ column: fk.column, referenced_table: fk.referencedTable, referenced_column: fk.referencedColumn }),
                projectId]
             );
+          } catch (_) {}
+          // Column-level lineage from FK constraint (referenced parent → referencing child)
+          try {
+            const lineageService = require('../services/lineageService');
+            await lineageService.ingestForeignKeyLineage(sourceAsset.id, targetAsset.id, fk.column, fk.referencedColumn);
           } catch (_) {}
         }
       }

@@ -547,25 +547,14 @@ export default function Investigation() {
             </g>
           </svg>
 
-          {/* Floating Legend */}
-          <div className="absolute bottom-4 right-4 bg-slate-900/85 backdrop-blur-sm border border-slate-800 rounded-lg p-2.5 pointer-events-none" style={{ fontSize: '9px' }}>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-              {Object.entries(DOMAIN_COLORS).map(([dom, color]) => (
-                <div key={dom} className="flex items-center gap-1.5">
-                  <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: color + '30', border: `1.5px solid ${color}` }}/>
-                  <span className="text-slate-400">{DOMAIN_LABELS[dom]}</span>
-                </div>
-              ))}
-            </div>
-            <div className="border-t border-slate-800 mt-1.5 pt-1.5 grid grid-cols-2 gap-x-4 gap-y-0.5">
-              {Object.entries(REL_COLORS).slice(0, 6).map(([rel, color]) => (
-                <div key={rel} className="flex items-center gap-1.5">
-                  <div className="w-3 h-0.5 rounded flex-shrink-0" style={{ background: color }}/>
-                  <span className="text-slate-500">{rel.replace(/_/g, ' ').toLowerCase()}</span>
-                </div>
-              ))}
-            </div>
-          </div>
+          {/* Floating Legend — only shows entity/relationship types actually in the visible graph */}
+          <FloatingLegend
+            nodes={layoutNodes}
+            edges={graphData?.edges || []}
+            DOMAIN_COLORS={DOMAIN_COLORS}
+            DOMAIN_LABELS={DOMAIN_LABELS}
+            REL_COLORS={REL_COLORS}
+          />
         </div>
       </div>
 
@@ -715,6 +704,79 @@ export default function Investigation() {
         ) : null}
       </div>
       )}
+    </div>
+  );
+}
+
+// ── Collapsible legend that filters down to entity/relationship types
+// actually present in the currently-visible graph. Prevents the 30-entity
+// industry-template legend from overwhelming the canvas.
+function FloatingLegend({ nodes, edges, DOMAIN_COLORS, DOMAIN_LABELS, REL_COLORS }) {
+  const [collapsed, setCollapsed] = React.useState(false);
+
+  const presentDomains = React.useMemo(() => {
+    const seen = new Set();
+    (nodes || []).forEach(n => { if (n.domain) seen.add(n.domain); });
+    return [...seen]
+      .filter(d => DOMAIN_COLORS[d])
+      .sort((a, b) => (DOMAIN_LABELS[a] || a).localeCompare(DOMAIN_LABELS[b] || b));
+  }, [nodes, DOMAIN_COLORS, DOMAIN_LABELS]);
+
+  const presentRels = React.useMemo(() => {
+    const seen = new Set();
+    (edges || []).forEach(e => { if (e.relationship) seen.add(e.relationship); });
+    return [...seen]
+      .filter(r => REL_COLORS[r])
+      .sort();
+  }, [edges, REL_COLORS]);
+
+  if (collapsed) {
+    return (
+      <button onClick={() => setCollapsed(false)}
+        className="absolute bottom-4 right-4 bg-slate-900/85 backdrop-blur-sm border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] text-slate-400 hover:text-slate-200 flex items-center gap-1.5">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
+        Legend
+        <span className="text-slate-600 font-mono">({presentDomains.length + presentRels.length})</span>
+      </button>
+    );
+  }
+
+  return (
+    <div className="absolute bottom-4 right-4 bg-slate-900/85 backdrop-blur-sm border border-slate-800 rounded-lg text-[10px] max-w-[260px]">
+      <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-slate-800">
+        <span className="text-slate-300 font-semibold text-[10px]">Legend</span>
+        <span className="text-[9px] text-slate-600 font-mono">
+          {presentDomains.length} types · {presentRels.length} rels
+        </span>
+        <button onClick={() => setCollapsed(true)} className="text-slate-500 hover:text-slate-300 ml-2" title="Collapse legend">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14"/></svg>
+        </button>
+      </div>
+      <div className="p-2 max-h-[280px] overflow-y-auto">
+        {presentDomains.length > 0 && (
+          <div className="grid grid-cols-1 gap-y-1">
+            {presentDomains.map(dom => (
+              <div key={dom} className="flex items-center gap-1.5">
+                <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: DOMAIN_COLORS[dom] + '30', border: `1.5px solid ${DOMAIN_COLORS[dom]}` }}/>
+                <span className="text-slate-400 truncate text-[10px]">{DOMAIN_LABELS[dom] || dom.replace(/_/g, ' ')}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {presentRels.length > 0 && (
+          <div className="border-t border-slate-800 mt-1.5 pt-1.5 grid grid-cols-1 gap-y-0.5">
+            {presentRels.map(rel => (
+              <div key={rel} className="flex items-center gap-1.5">
+                <div className="w-3 h-0.5 rounded flex-shrink-0" style={{ background: REL_COLORS[rel] }}/>
+                <span className="text-slate-500 truncate text-[10px]">{rel.replace(/_/g, ' ').toLowerCase()}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {presentDomains.length === 0 && presentRels.length === 0 && (
+          <div className="text-slate-600 italic text-[10px]">No entities in the current view</div>
+        )}
+      </div>
     </div>
   );
 }

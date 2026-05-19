@@ -318,9 +318,90 @@ async function listAssetsWithColumns() {
   return r.rows;
 }
 
+// ── Discovery integration ───────────────────────────────────────────────────
+// Called from connector scans (MySQL, Postgres, Snowflake) to register the
+// columns of a discovered table — so the Column Lineage page is populated
+// automatically with no separate upload step.
+async function ingestDiscoveredTable(assetId, columns, options = {}) {
+  if (!assetId || !Array.isArray(columns) || !columns.length) return { columns: 0 };
+  const piiHints = (name) => {
+    const n = (name || '').toLowerCase();
+    if (/email/.test(n))       return { is_pii: true, pii_type: 'EMAIL' };
+    if (/(^ssn$|^tax_?id$|tin)/.test(n)) return { is_pii: true, pii_type: 'SSN' };
+    if (/(^phone$|mobile|telephone)/.test(n)) return { is_pii: true, pii_type: 'PHONE' };
+    if (/(^dob$|date_of_birth|birth_date)/.test(n))      return { is_pii: true, pii_type: 'DOB' };
+    if (/(first_?name|last_?name|full_?name|legal_?name)/.test(n)) return { is_pii: true, pii_type: 'NAME' };
+    if (/(address|street|zipcode|postal)/.test(n)) return { is_pii: true, pii_type: 'ADDRESS' };
+    return { is_pii: false, pii_type: null };
+  };
+
+  let added = 0;
+  for (const col of columns) {
+    const name = col.name || col.column_name;
+    if (!name) continue;
+    const pii = piiHints(name);
+    try {
+      await dbQuery(
+        `INSERT INTO asset_columns
+           (asset_id, column_name, data_type, ordinal_position, is_nullable,
+            is_primary_key, is_pii, pii_type, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (asset_id, column_name) DO UPDATE
+           SET data_type = EXCLUDED.data_type,
+               ordinal_position = EXCLUDED.ordinal_position,
+               is_nullable = EXCLUDED.is_nullable,
+               is_primary_key = EXCLUDED.is_primary_key,
+               is_pii = EXCLUDED.is_pii,
+               pii_type = EXCLUDED.pii_type,
+               updated_at = now()`,
+        [
+          assetId, name,
+          col.type || col.data_type || null,
+          col.position || col.ordinal_position || null,
+          col.nullable !== undefined ? col.nullable : (col.is_nullable !== undefined ? col.is_nullable : true),
+          !!(col.isPrimaryKey || col.is_primary_key),
+          pii.is_pii, pii.pii_type,
+          options.source || 'mysql_introspection',
+        ]
+      );
+      added++;
+    } catch (_) {}
+  }
+  return { columns: added };
+}
+
+// Wire foreign-key references into column_lineage as 'fk_reference' edges so
+// they appear alongside dbt transformations on the Column Lineage page.
+async function ingestForeignKeyLineage(sourceAssetId, targetAssetId, fkColumn, refColumn) {
+  if (!sourceAssetId || !targetAssetId || !fkColumn || !refColumn) return false;
+  try {
+    const src = await dbQuery(
+      `SELECT id FROM asset_columns WHERE asset_id = $1 AND column_name = $2`,
+      [sourceAssetId, fkColumn]
+    );
+    const tgt = await dbQuery(
+      `SELECT id FROM asset_columns WHERE asset_id = $1 AND column_name = $2`,
+      [targetAssetId, refColumn]
+    );
+    if (!src.rows[0] || !tgt.rows[0]) return false;
+    // FK is a *reference* (downstream depends on upstream's value existing).
+    // Lineage direction: referenced (parent) → referencing (child).
+    await dbQuery(
+      `INSERT INTO column_lineage
+         (upstream_column_id, downstream_column_id, transformation_type, transformation_sql, confidence, source)
+       VALUES ($1, $2, 'fk_reference', $3, 1.00, 'mysql_fk')
+       ON CONFLICT (upstream_column_id, downstream_column_id) DO NOTHING`,
+      [tgt.rows[0].id, src.rows[0].id, `FOREIGN KEY (${fkColumn}) REFERENCES ${refColumn}`]
+    );
+    return true;
+  } catch (_) { return false; }
+}
+
 module.exports = {
   ingestProject,
   ingestDbtManifest,
+  ingestDiscoveredTable,
+  ingestForeignKeyLineage,
   getColumnsForAsset,
   getUpstreamLineage,
   getDownstreamLineage,

@@ -291,6 +291,11 @@ export function AssetDetailPanel({ asset, onEnrich, enriching, onInvestigate, on
         <button onClick={() => onInvestigate?.(asset.id)} className="btn-secondary justify-center">
           🔍 Investigate Relationships
         </button>
+        {asset.content_domain === 'STRUCTURED_DATA' && (
+          <a href={`/lineage?asset=${asset.id}`} className="btn-secondary justify-center">
+            ⇄ View Column Lineage
+          </a>
+        )}
       </div>
     </div>
   );

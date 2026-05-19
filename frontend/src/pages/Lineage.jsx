@@ -239,10 +239,8 @@ export default function Lineage() {
               </div>
               <div className="text-base font-semibold text-slate-200 mb-1">Column-Level Lineage</div>
               <p className="text-xs text-slate-500 leading-relaxed mb-4">
-                See exactly where each column comes from and what depends on it.
-                The platform ingests <span className="text-slate-300 font-mono">dbt manifest.json</span>,
-                MySQL view definitions, and Snowflake <span className="text-slate-300 font-mono">ACCESS_HISTORY</span>
-                to build a full data-flow graph.
+                Trace every column from its source through every transformation to every consumer.
+                Lineage is populated automatically as connectors scan your databases and warehouses.
               </p>
               <div className="grid grid-cols-2 gap-2 text-[10px]">
                 <div className="p-2.5 rounded border border-slate-800 bg-slate-900/50">
@@ -255,7 +253,7 @@ export default function Lineage() {
                 </div>
                 <div className="p-2.5 rounded border border-slate-800 bg-slate-900/50">
                   <div className="text-xl font-semibold text-slate-200">{stats.assets_with_columns}</div>
-                  <div className="text-slate-600 mt-0.5">Models indexed</div>
+                  <div className="text-slate-600 mt-0.5">Assets with columns</div>
                 </div>
                 <div className="p-2.5 rounded border border-slate-800 bg-slate-900/50">
                   <div className="text-xl font-semibold text-amber-400">{stats.pii_columns}</div>
@@ -263,9 +261,7 @@ export default function Lineage() {
                 </div>
               </div>
               <div className="mt-5 text-[10.5px] text-slate-500 leading-relaxed">
-                <span className="text-slate-300">Why this matters:</span> When a CDO asks
-                "if we deprecate <span className="font-mono">orders.amount</span>, what breaks?" —
-                this is the page that answers in 2 seconds instead of 2 weeks.
+                Select an asset on the left to inspect its columns and trace their lineage upstream and downstream.
               </div>
             </div>
           </div>
@@ -392,47 +388,37 @@ export default function Lineage() {
         )}
       </div>
 
-      {/* RIGHT PANE — Ingest / Help */}
+      {/* RIGHT PANE — Discovery Sources */}
       <div className="w-72 flex-shrink-0 border-l border-slate-800 bg-slate-900/50 overflow-y-auto p-4 space-y-4">
         <div>
           <div className="text-[10.5px] uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1">
-            <Sparkles size={11}/>Lineage Sources
+            <Sparkles size={11}/>Discovery Sources
+          </div>
+          <div className="text-[10.5px] text-slate-500 leading-relaxed mb-2">
+            Column metadata and lineage are populated automatically whenever a connector scans a source.
+            No separate import step.
           </div>
           <div className="space-y-1.5 text-[10.5px]">
             <div className="p-2 rounded border border-slate-800 bg-slate-900/40">
-              <div className="text-slate-200 font-medium">dbt Manifest</div>
-              <div className="text-slate-500 text-[10px]">Upload <span className="font-mono">manifest.json</span> from any dbt project — sources, staging, marts.</div>
-              <button className="mt-1 text-[10px] text-slate-400 hover:text-slate-200 flex items-center gap-1" onClick={() => alert('Ingest API ready: POST /api/lineage/dbt/ingest with { manifest, project_name }. UI for file upload arriving in next sprint.')}>
+              <div className="text-slate-200 font-medium">SQL Database Scan</div>
+              <div className="text-slate-500 text-[10px]">MySQL / Postgres connectors extract columns from <span className="font-mono">INFORMATION_SCHEMA</span> and capture FK references as column-level edges.</div>
+              <Link to="/connectors" className="mt-1 text-[10px] text-slate-400 hover:text-slate-200 flex items-center gap-1 inline-flex">
+                <ExternalLink size={10}/>Configure connector
+              </Link>
+            </div>
+            <div className="p-2 rounded border border-slate-800 bg-slate-900/40">
+              <div className="text-slate-200 font-medium">dbt Project Ingest</div>
+              <div className="text-slate-500 text-[10px]">Upload <span className="font-mono">manifest.json</span> to capture transformations across sources, staging, and marts.</div>
+              <button className="mt-1 text-[10px] text-slate-400 hover:text-slate-200 flex items-center gap-1"
+                onClick={() => alert('POST /api/lineage/dbt/ingest with { manifest, project_name } — UI uploader on the roadmap.')}>
                 <Upload size={10}/>Ingest manifest
               </button>
             </div>
             <div className="p-2 rounded border border-slate-800 bg-slate-900/40 opacity-60">
-              <div className="text-slate-300 font-medium">MySQL / Postgres Introspection</div>
-              <div className="text-slate-500 text-[10px]">Auto-extract FKs and view definitions from existing connectors.</div>
-              <div className="text-[9.5px] text-slate-600 mt-0.5 italic">Roadmap</div>
-            </div>
-            <div className="p-2 rounded border border-slate-800 bg-slate-900/40 opacity-60">
               <div className="text-slate-300 font-medium">Snowflake ACCESS_HISTORY</div>
-              <div className="text-slate-500 text-[10px]">Column-level lineage from actual executed queries.</div>
+              <div className="text-slate-500 text-[10px]">Reconstruct column-level lineage from executed query history.</div>
               <div className="text-[9.5px] text-slate-600 mt-0.5 italic">Roadmap</div>
             </div>
-          </div>
-        </div>
-
-        <div>
-          <div className="text-[10.5px] uppercase tracking-wider text-slate-500 mb-2">Demo Story</div>
-          <div className="text-[11px] text-slate-400 leading-relaxed space-y-2">
-            <p>
-              The sample data shipped here is a <span className="text-slate-300">FIBO-aligned banking warehouse</span> and a
-              <span className="text-slate-300"> CDISC-aligned clinical trial warehouse</span>.
-            </p>
-            <p>Try this:</p>
-            <ol className="list-decimal pl-4 space-y-1 text-slate-500">
-              <li>Open <span className="font-mono text-slate-300">fact_trades</span> → click <span className="font-mono text-slate-300">notional_usd</span>.</li>
-              <li>See the upstream chain: <span className="font-mono">raw_trades.notional × FX rate</span>.</li>
-              <li>See downstream: it powers <span className="font-mono">mart_risk_exposure</span> and <span className="font-mono">mart_concentration_report</span>.</li>
-              <li>Click "view impact" — proves the value in one screen.</li>
-            </ol>
           </div>
         </div>
 
@@ -442,18 +428,29 @@ export default function Lineage() {
           </div>
           <p className="mb-1">
             Asset-level lineage (table → table) is the bare minimum.
-            <span className="text-slate-200"> Column-level</span> answers the questions auditors and CDOs actually ask:
+            <span className="text-slate-200"> Column-level</span> answers what auditors and stewards actually need:
           </p>
           <ul className="list-disc pl-4 text-slate-500 space-y-0.5">
-            <li>"Where does this PII flow?"</li>
-            <li>"If I deprecate this column, what breaks?"</li>
-            <li>"Can I prove this number came from approved data?"</li>
+            <li>Where does this PII flow?</li>
+            <li>If a column is deprecated, what breaks?</li>
+            <li>Can we prove this number came from approved data?</li>
           </ul>
         </div>
 
-        <Link to="/knowledge-graph" className="text-[10.5px] text-slate-400 hover:text-slate-200 flex items-center gap-1">
-          <ExternalLink size={10}/>Open asset-level Knowledge Graph
-        </Link>
+        <div>
+          <div className="text-[10.5px] uppercase tracking-wider text-slate-500 mb-2">Related Views</div>
+          <div className="space-y-1">
+            <Link to="/knowledge-graph" className="text-[10.5px] text-slate-400 hover:text-slate-200 flex items-center gap-1.5 p-1.5 rounded hover:bg-slate-800/40">
+              <ExternalLink size={10}/>Asset-level Knowledge Graph
+            </Link>
+            <Link to="/catalog" className="text-[10.5px] text-slate-400 hover:text-slate-200 flex items-center gap-1.5 p-1.5 rounded hover:bg-slate-800/40">
+              <ExternalLink size={10}/>Catalog (browse all assets)
+            </Link>
+            <Link to="/connectors" className="text-[10.5px] text-slate-400 hover:text-slate-200 flex items-center gap-1.5 p-1.5 rounded hover:bg-slate-800/40">
+              <ExternalLink size={10}/>Connectors (add a source)
+            </Link>
+          </div>
+        </div>
       </div>
     </div>
   );
