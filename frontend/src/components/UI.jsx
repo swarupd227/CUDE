@@ -9,6 +9,68 @@ function displayProjectCode(code) {
   return code;
 }
 
+// ── Trust Score ──────────────────────────────────────────────────────────────
+const TRUST_COLOR = {
+  A: { fg: '#4ade80', bg: 'rgba(74,222,128,0.12)', bd: 'rgba(74,222,128,0.35)' },
+  B: { fg: '#a3e635', bg: 'rgba(163,230,53,0.12)', bd: 'rgba(163,230,53,0.35)' },
+  C: { fg: '#facc15', bg: 'rgba(250,204,21,0.12)', bd: 'rgba(250,204,21,0.35)' },
+  D: { fg: '#fb923c', bg: 'rgba(251,146,60,0.12)', bd: 'rgba(251,146,60,0.35)' },
+  F: { fg: '#f87171', bg: 'rgba(248,113,113,0.12)', bd: 'rgba(248,113,113,0.35)' },
+};
+
+export function TrustBadge({ trust, size = 'sm' }) {
+  if (!trust) return null;
+  const c = TRUST_COLOR[trust.grade] || TRUST_COLOR.F;
+  const dims = size === 'lg' ? 'text-sm px-2.5 py-1' : 'text-[10px] px-1.5 py-0.5';
+  return (
+    <span className={`inline-flex items-center gap-1 rounded font-mono font-semibold ${dims}`}
+      style={{ color: c.fg, background: c.bg, border: `1px solid ${c.bd}` }}
+      title={`Trust Score: ${trust.score}/100 (grade ${trust.grade})`}>
+      <span>{trust.score}</span>
+      <span className="opacity-70">·</span>
+      <span>{trust.grade}</span>
+    </span>
+  );
+}
+
+// Full breakdown panel — the "why" behind the score
+export function TrustBreakdown({ trust }) {
+  if (!trust) return null;
+  const c = TRUST_COLOR[trust.grade] || TRUST_COLOR.F;
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-3">
+      <div className="flex items-center gap-3 mb-3">
+        <div className="w-12 h-12 rounded-lg flex flex-col items-center justify-center flex-shrink-0"
+          style={{ background: c.bg, border: `1px solid ${c.bd}` }}>
+          <span className="text-lg font-bold leading-none" style={{ color: c.fg }}>{trust.score}</span>
+          <span className="text-[9px] font-mono mt-0.5" style={{ color: c.fg }}>grade {trust.grade}</span>
+        </div>
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-slate-200">Trust Score</div>
+          <div className="text-[10px] text-slate-500">Composite data-health metric · 0–100</div>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {trust.components.map(comp => (
+          <div key={comp.key}>
+            <div className="flex items-center justify-between text-[11px] mb-0.5">
+              <span className="text-slate-300">{comp.label} <span className="text-slate-600">· {comp.weight}%</span></span>
+              <span className="font-mono text-slate-400">{comp.score}</span>
+            </div>
+            <div className="h-1 rounded-full bg-slate-800 overflow-hidden">
+              <div className="h-full rounded-full" style={{
+                width: `${comp.score}%`,
+                background: comp.score >= 75 ? '#4ade80' : comp.score >= 50 ? '#facc15' : '#f87171',
+              }}/>
+            </div>
+            <div className="text-[10px] text-slate-500 mt-0.5">{comp.detail}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export class ErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { hasError: false, error: null }; }
   static getDerivedStateFromError(error) { return { hasError: true, error }; }
@@ -115,7 +177,10 @@ export function AssetCard({ asset, onClick, selected }) {
           <div className="text-sm font-medium text-slate-200 truncate">{asset.file_name}</div>
           <div className="text-xs text-slate-600 mt-0.5 truncate">{asset.vault_path}</div>
         </div>
-        {asset.ai_enriched && <span className="badge bg-blue-900/40 text-blue-300 border border-blue-700/30 flex-shrink-0 text-[10px]">✦ AI</span>}
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {asset.ai_enriched && <span className="badge bg-blue-900/40 text-blue-300 border border-blue-700/30 text-[10px]">✦ AI</span>}
+          <TrustBadge trust={asset.trust}/>
+        </div>
       </div>
       <div className="flex flex-wrap gap-1 mb-3">
         <DomainBadge domain={asset.content_domain}/>
@@ -155,6 +220,7 @@ export function AssetDetailPanel({ asset, onEnrich, enriching, onInvestigate, on
           <div key={k}><div className="text-slate-600">{k}</div><div className="text-slate-300 font-medium truncate mt-0.5">{v||'—'}</div></div>
         ))}
       </div>
+      {asset.trust && <TrustBreakdown trust={asset.trust}/>}
       <div>
         <div className="label mb-1">Classification Confidence</div>
         <ConfBar conf={asset.classification_confidence}/>

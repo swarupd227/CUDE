@@ -123,6 +123,11 @@ router.get('/catalog', async (req, res) => {
   try {
     const assetRepo = require('../db/repositories/assetRepo');
     const result = await assetRepo.findAll({ domain, classification, zone, project_code: project, search }, parseInt(page), parseInt(limit));
+    // Attach Trust Score to each returned asset (batched — one set of count queries)
+    try {
+      const trust = require('../services/trustScoreService');
+      result.assets = await trust.scoreAssets(result.assets || []);
+    } catch (_) {}
     return res.json(result);
   } catch (_) {}
 
@@ -134,13 +139,53 @@ router.get('/catalog', async (req, res) => {
   if (project) result = result.filter(f=>f.project_code===project);
   if (search) { const q=search.toLowerCase(); result=result.filter(f=>f.file_name?.toLowerCase().includes(q)||f.project_code?.toLowerCase().includes(q)||f.content_domain?.toLowerCase().includes(q)); }
   const total=result.length, p=parseInt(page), lim=parseInt(limit);
-  res.json({ assets:result.slice((p-1)*lim,p*lim), total, page:p, pages:Math.ceil(total/lim) });
+  let pageAssets = result.slice((p-1)*lim,p*lim);
+  try {
+    const trust = require('../services/trustScoreService');
+    pageAssets = pageAssets.map(a => ({ ...a, trust: trust.scoreAsset(a, {}) }));
+  } catch (_) {}
+  res.json({ assets:pageAssets, total, page:p, pages:Math.ceil(total/lim) });
 });
 
 router.get('/catalog/:id', async (req, res) => {
   const asset = await findAsset(req.params.id);
   if (!asset) return res.status(404).json({ error:'Asset not found' });
+  try {
+    const trust = require('../services/trustScoreService');
+    asset.trust = await trust.scoreSingle(asset);
+  } catch (_) {}
   res.json(asset);
+});
+
+// ── Trust Score (full breakdown for a single asset) ─────────────────────────
+router.get('/trust/:assetId', async (req, res) => {
+  try {
+    const asset = await findAsset(req.params.assetId);
+    if (!asset) return res.status(404).json({ error: 'Asset not found' });
+    const trust = require('../services/trustScoreService');
+    const result = await trust.scoreSingle(asset);
+    res.json({ asset_id: asset.id, file_name: asset.file_name, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Trust Score distribution across the whole catalog (for dashboards)
+router.get('/trust', async (req, res) => {
+  try {
+    const assetRepo = require('../db/repositories/assetRepo');
+    const all = await assetRepo.findAll({}, 1, 1000);
+    const trust = require('../services/trustScoreService');
+    const scored = await trust.scoreAssets(all.assets || []);
+    const dist = { A: 0, B: 0, C: 0, D: 0, F: 0 };
+    let sum = 0;
+    scored.forEach(a => { dist[a.trust.grade]++; sum += a.trust.score; });
+    res.json({
+      total: scored.length,
+      average: scored.length ? Math.round(sum / scored.length) : 0,
+      distribution: dist,
+      lowest: scored.slice().sort((a, b) => a.trust.score - b.trust.score).slice(0, 10)
+        .map(a => ({ id: a.id, file_name: a.file_name, score: a.trust.score, grade: a.trust.grade })),
+    });
+  } catch (e) { res.json({ total: 0, average: 0, distribution: {}, error: e.message }); }
 });
 
 // ── Upload & Parse ────────────────────────────────────────────────────────────
