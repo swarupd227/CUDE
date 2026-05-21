@@ -1206,34 +1206,211 @@ router.get('/queue', (req, res) => {
   res.json({ queue:enriched, total:pending.length });
 });
 
-router.post('/queue/:id/approve', (req, res) => {
+router.post('/queue/:id/approve', async (req, res) => {
   const item = approvalQueue.find(q=>q.id===req.params.id);
   if (!item) return res.status(404).json({ error:'Queue item not found' });
-  item.status='APPROVED'; item.resolved_at=new Date().toISOString(); item.resolved_by=req.body.approver||'data_steward@company.com';
+  const reviewer = req.body.approver||req.user?.email||'data_steward@company.com';
+  item.status='APPROVED'; item.resolved_at=new Date().toISOString(); item.resolved_by=reviewer;
   const asset = catalog.find(a=>a.id===item.asset_id);
   if (asset) { asset.data_classification=item.proposed_tier; asset.classification_zone='AUTONOMOUS'; asset.lifecycle_state='APPROVED'; asset.modified_at=new Date().toISOString(); }
   const assetName = asset?.file_name || item.asset_id;
+  // Approval confirms the AI proposal — seed ground truth where predicted == true.
+  try {
+    const { query: dbQuery } = require('../db/pool');
+    await dbQuery(
+      `INSERT INTO classification_ground_truth (asset_id, true_tier, predicted_tier, source, labeled_by)
+       VALUES ($1,$2,$2,'steward_review',$3)
+       ON CONFLICT (asset_id) DO UPDATE SET true_tier=$2, predicted_tier=$2, labeled_by=$3, labeled_at=now()`,
+      [item.asset_id, item.proposed_tier, reviewer]
+    );
+  } catch (_) {}
   emit('AssetApproved', 'Data Steward',
     `Steward approved: ${assetName} → ${item.proposed_tier} (manual approval)`,
     { queue_id:item.id, asset_id:item.asset_id, tier:item.proposed_tier });
-  audit({ actor_type:'USER', actor_id:req.body.approver||req.user?.email||'steward', action:'approval.approved', entity_type:'asset', entity_id:item.asset_id, before_state:{ tier:item.current_tier }, after_state:{ tier:item.proposed_tier, zone:'AUTONOMOUS' } });
+  audit({ actor_type:'USER', actor_id:reviewer, action:'approval.approved', entity_type:'asset', entity_id:item.asset_id, before_state:{ tier:item.current_tier }, after_state:{ tier:item.proposed_tier, zone:'AUTONOMOUS' } });
   if (asset) indexAsset(asset);
   res.json({ item, asset });
 });
 
-router.post('/queue/:id/reject', (req, res) => {
+// Structured reason codes for a rejection — forces accountable, analyzable corrections
+const REJECTION_REASON_CODES = {
+  WRONG_TIER:           'Proposed tier is incorrect',
+  MISSED_SENSITIVE:     'Contains sensitive content the AI missed',
+  OVER_CLASSIFIED:      'Over-classified — less sensitive than proposed',
+  WRONG_DOMAIN:         'Content domain misidentified',
+  POLICY_EXCEPTION:     'Business/policy exception applies',
+  INSUFFICIENT_CONTENT: 'Not enough content was extracted to classify',
+  OTHER:                'Other (see justification)',
+};
+
+router.get('/queue/reason-codes', (req, res) => {
+  res.json({ reason_codes: Object.entries(REJECTION_REASON_CODES).map(([code, label]) => ({ code, label })) });
+});
+
+router.post('/queue/:id/reject', async (req, res) => {
   const item = approvalQueue.find(q=>q.id===req.params.id);
   if (!item) return res.status(404).json({ error:'Queue item not found' });
-  item.status='REJECTED'; item.resolved_at=new Date().toISOString(); item.resolved_by=req.body.approver||'data_steward@company.com'; item.override_tier=req.body.override_tier||item.current_tier;
+
+  const { reason_code, justification, override_tier, approver } = req.body;
+  // Closed-loop requirement: a rejection MUST carry a structured reason + justification
+  if (!reason_code || !REJECTION_REASON_CODES[reason_code]) {
+    return res.status(400).json({ error: 'A valid reason_code is required to reject a classification', valid_codes: Object.keys(REJECTION_REASON_CODES) });
+  }
+  if (!justification || !justification.trim()) {
+    return res.status(400).json({ error: 'A justification is required to reject a classification' });
+  }
+
+  const reviewer = approver || req.user?.email || 'data_steward@company.com';
+  const correctedTier = override_tier || item.current_tier;
+
+  item.status='REJECTED'; item.resolved_at=new Date().toISOString(); item.resolved_by=reviewer;
+  item.override_tier=correctedTier; item.reason_code=reason_code; item.justification=justification;
+
   const asset = catalog.find(a=>a.id===item.asset_id);
-  if (asset&&item.override_tier) { asset.data_classification=item.override_tier; asset.classification_zone='AUTONOMOUS'; }
+  // Re-classification: apply the corrected tier and route to a re-review state
+  // (not silently AUTONOMOUS) so the correction is itself tracked.
+  if (asset) {
+    asset.data_classification = correctedTier;
+    asset.classification_zone = 'SUPERVISED';
+    asset.lifecycle_state = 'RECLASSIFIED';
+    asset.modified_at = new Date().toISOString();
+  }
   const assetName = asset?.file_name || item.asset_id;
+
+  // Persist the correction as feedback + seed a ground-truth label (closes the loop)
+  try {
+    const { query: dbQuery } = require('../db/pool');
+    await dbQuery(
+      `INSERT INTO classification_feedback (asset_id, queue_id, proposed_tier, corrected_tier, reason_code, justification, reviewer, signals)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [item.asset_id, String(item.id), item.proposed_tier || item.current_tier, correctedTier, reason_code, justification, reviewer, JSON.stringify(item.signals || [])]
+    );
+    await dbQuery(
+      `INSERT INTO classification_ground_truth (asset_id, true_tier, predicted_tier, source, labeled_by)
+       VALUES ($1,$2,$3,'steward_review',$4)
+       ON CONFLICT (asset_id) DO UPDATE SET true_tier=$2, predicted_tier=$3, labeled_by=$4, labeled_at=now()`,
+      [item.asset_id, correctedTier, item.proposed_tier || item.current_tier, reviewer]
+    );
+  } catch (_) {}
+
+  // Notify the asset owner / designer
+  const owner = asset?.designer || asset?.owner;
   emit('AssetRejected', 'Data Steward',
-    `Steward rejected proposed classification for ${assetName} — reverted to ${item.override_tier}`,
-    { queue_id:item.id, override_tier:item.override_tier });
-  audit({ actor_type:'USER', actor_id:req.body.approver||req.user?.email||'steward', action:'approval.rejected', entity_type:'asset', entity_id:item.asset_id, before_state:{ tier:item.proposed_tier }, after_state:{ tier:item.override_tier, override:true } });
+    `Steward rejected proposed classification for ${assetName} → corrected to ${correctedTier} (${REJECTION_REASON_CODES[reason_code]})${owner ? ` — owner ${String(owner).split('@')[0]} notified` : ''}`,
+    { queue_id:item.id, override_tier:correctedTier, reason_code, justification, owner });
+
+  audit({ actor_type:'USER', actor_id:reviewer, action:'approval.rejected', entity_type:'asset', entity_id:item.asset_id,
+    before_state:{ tier:item.proposed_tier }, after_state:{ tier:correctedTier, override:true, reason_code, justification } });
   if (asset) indexAsset(asset);
-  res.json({ item, asset });
+  res.json({ item, asset, feedback_recorded: true });
+});
+
+// ── Classification Accuracy Validation ──────────────────────────────────────
+// Scores the classifier's predictions against reviewer-confirmed ground-truth
+// labels (seeded automatically on every approve/reject). Returns a confusion
+// matrix plus per-tier precision / recall / F1 and overall accuracy.
+const TIER_ORDER = ['PUBLIC','INTERNAL','CONFIDENTIAL','RESTRICTED','TRADE_SECRET'];
+
+router.get('/validation/accuracy', async (req, res) => {
+  try {
+    const { query: dbQuery } = require('../db/pool');
+    const rows = (await dbQuery(
+      `SELECT predicted_tier, true_tier FROM classification_ground_truth
+       WHERE predicted_tier IS NOT NULL AND true_tier IS NOT NULL`
+    )).rows;
+
+    const tiers = [...TIER_ORDER];
+    // include any unexpected tiers that appear in the data
+    rows.forEach(r => { [r.predicted_tier, r.true_tier].forEach(t => { if (t && !tiers.includes(t)) tiers.push(t); }); });
+
+    // Confusion matrix: matrix[actual][predicted]
+    const matrix = {};
+    tiers.forEach(a => { matrix[a] = {}; tiers.forEach(p => matrix[a][p] = 0); });
+    let correct = 0;
+    rows.forEach(r => {
+      if (!matrix[r.true_tier]) { matrix[r.true_tier] = {}; tiers.forEach(p => matrix[r.true_tier][p] = 0); }
+      matrix[r.true_tier][r.predicted_tier] = (matrix[r.true_tier][r.predicted_tier] || 0) + 1;
+      if (r.true_tier === r.predicted_tier) correct++;
+    });
+
+    // Per-tier precision / recall / F1
+    const perTier = tiers.map(t => {
+      const tp = matrix[t]?.[t] || 0;
+      let fp = 0, fn = 0;
+      tiers.forEach(o => {
+        if (o !== t) {
+          fp += matrix[o]?.[t] || 0; // predicted t but actually o
+          fn += matrix[t]?.[o] || 0; // actually t but predicted o
+        }
+      });
+      const support = tp + fn;
+      const precision = (tp + fp) ? tp / (tp + fp) : null;
+      const recall = support ? tp / support : null;
+      const f1 = (precision != null && recall != null && (precision + recall)) ? 2 * precision * recall / (precision + recall) : null;
+      return {
+        tier: t, support, true_positives: tp, false_positives: fp, false_negatives: fn,
+        precision: precision != null ? +(precision).toFixed(3) : null,
+        recall: recall != null ? +(recall).toFixed(3) : null,
+        f1: f1 != null ? +(f1).toFixed(3) : null,
+      };
+    }).filter(r => r.support > 0 || r.false_positives > 0);
+
+    const total = rows.length;
+    // Macro-F1 across tiers that have support
+    const f1s = perTier.filter(r => r.f1 != null).map(r => r.f1);
+    const macroF1 = f1s.length ? +(f1s.reduce((s, x) => s + x, 0) / f1s.length).toFixed(3) : null;
+
+    res.json({
+      total_labeled: total,
+      correct,
+      accuracy: total ? +(correct / total).toFixed(3) : null,
+      macro_f1: macroF1,
+      tiers,
+      confusion_matrix: matrix,
+      per_tier: perTier,
+      note: total === 0 ? 'No ground-truth labels yet. Approve/reject items in the queue or label assets to build the evaluation set.' : undefined,
+    });
+  } catch (e) {
+    res.json({ total_labeled: 0, accuracy: null, confusion_matrix: {}, per_tier: [], error: e.message });
+  }
+});
+
+// Manually label an asset's true tier (adds to the ground-truth set)
+router.post('/validation/label', async (req, res) => {
+  const { asset_id, true_tier, predicted_tier } = req.body;
+  if (!asset_id || !true_tier) return res.status(400).json({ error: 'asset_id and true_tier are required' });
+  try {
+    const { query: dbQuery } = require('../db/pool');
+    // If predicted not supplied, use the asset's current classification as the prediction
+    let predicted = predicted_tier;
+    if (!predicted) {
+      const a = await dbQuery('SELECT data_classification FROM assets WHERE id = $1', [asset_id]);
+      predicted = a.rows[0]?.data_classification || null;
+    }
+    await dbQuery(
+      `INSERT INTO classification_ground_truth (asset_id, true_tier, predicted_tier, source, labeled_by)
+       VALUES ($1,$2,$3,'manual_label',$4)
+       ON CONFLICT (asset_id) DO UPDATE SET true_tier=$2, predicted_tier=$3, source='manual_label', labeled_by=$4, labeled_at=now()`,
+      [asset_id, true_tier, predicted, req.user?.email || 'reviewer']
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Feedback log — every steward correction, for analysis / retraining input
+router.get('/validation/feedback', async (req, res) => {
+  try {
+    const { query: dbQuery } = require('../db/pool');
+    const rows = (await dbQuery(
+      `SELECT cf.*, a.file_name FROM classification_feedback cf
+       LEFT JOIN assets a ON a.id = cf.asset_id
+       ORDER BY cf.created_at DESC LIMIT 200`
+    )).rows;
+    // Reason-code histogram — shows the dominant failure modes
+    const byReason = {};
+    rows.forEach(r => { byReason[r.reason_code] = (byReason[r.reason_code] || 0) + 1; });
+    res.json({ feedback: rows, by_reason: byReason, total: rows.length });
+  } catch (e) { res.json({ feedback: [], by_reason: {}, total: 0, error: e.message }); }
 });
 
 router.post('/queue/:id/escalate', (req, res) => {

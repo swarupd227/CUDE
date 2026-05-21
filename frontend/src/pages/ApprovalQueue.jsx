@@ -6,9 +6,22 @@ import { API, formatDate, formatTime } from '../utils/helpers';
 const PRIORITY_COLORS = { CRITICAL:'border-red-700/60 bg-red-950/20', HIGH:'border-orange-700/60 bg-orange-950/20', MEDIUM:'border-yellow-700/60 bg-yellow-950/20', LOW:'border-slate-700 bg-slate-800/20' };
 const CLASSES = ['PUBLIC','INTERNAL','CONFIDENTIAL','RESTRICTED','TRADE_SECRET'];
 
+const REASON_CODES = [
+  { code:'WRONG_TIER',           label:'Proposed tier is incorrect' },
+  { code:'MISSED_SENSITIVE',     label:'Contains sensitive content the AI missed' },
+  { code:'OVER_CLASSIFIED',      label:'Over-classified — less sensitive than proposed' },
+  { code:'WRONG_DOMAIN',         label:'Content domain misidentified' },
+  { code:'POLICY_EXCEPTION',     label:'Business/policy exception applies' },
+  { code:'INSUFFICIENT_CONTENT', label:'Not enough content was extracted to classify' },
+  { code:'OTHER',                label:'Other (see justification)' },
+];
+
 function QueueItem({ item, onApprove, onReject, onEscalate, processing }) {
   const [expanded, setExpanded] = useState(false);
   const [overrideTier, setOverrideTier] = useState(item.proposed_tier);
+  const [rejecting, setRejecting] = useState(false);
+  const [reasonCode, setReasonCode] = useState('');
+  const [justification, setJustification] = useState('');
   const hoursLeft = item.hours_remaining || 0;
   const isExpired = hoursLeft <= 0;
   const isGated = item.zone === 'GATED';
@@ -89,27 +102,58 @@ function QueueItem({ item, onApprove, onReject, onEscalate, processing }) {
 
       {/* Actions */}
       <div className="border-t border-slate-800 p-4 space-y-3">
-        {/* Override tier select for reject */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-500 flex-shrink-0">Override tier on reject:</span>
-          <select className="input flex-1 py-1 text-xs" value={overrideTier} onChange={e => setOverrideTier(e.target.value)}>
-            {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </div>
-
-        <div className="flex gap-2">
-          <button onClick={() => onApprove(item.id)} disabled={processing || isGated} title={isGated ? 'GATED — legal approval required first' : ''}
-            className={`btn-success flex-1 justify-center text-xs ${isGated ? 'opacity-50 cursor-not-allowed' : ''}`}>
-            <CheckCircle size={13}/>Approve {item.proposed_tier}
-          </button>
-          <button onClick={() => onReject(item.id, overrideTier)} disabled={processing} className="btn-danger flex-1 justify-center text-xs">
-            <XCircle size={13}/>Reject → {overrideTier}
-          </button>
-          <button onClick={() => onEscalate(item.id)} disabled={processing} className="btn-secondary text-xs px-3">
-            <AlertTriangle size={13}/>Escalate
-          </button>
-        </div>
-        {isGated && <div className="text-[10px] text-red-400/70 text-center">GATED zone — cannot auto-approve. Escalate to legal team.</div>}
+        {!rejecting ? (
+          <div className="flex gap-2">
+            <button onClick={() => onApprove(item.id)} disabled={processing || isGated} title={isGated ? 'GATED — legal approval required first' : ''}
+              className={`btn-success flex-1 justify-center text-xs ${isGated ? 'opacity-50 cursor-not-allowed' : ''}`}>
+              <CheckCircle size={13}/>Approve {item.proposed_tier}
+            </button>
+            <button onClick={() => setRejecting(true)} disabled={processing} className="btn-danger flex-1 justify-center text-xs">
+              <XCircle size={13}/>Reject / Reclassify
+            </button>
+            <button onClick={() => onEscalate(item.id)} disabled={processing} className="btn-secondary text-xs px-3">
+              <AlertTriangle size={13}/>Escalate
+            </button>
+          </div>
+        ) : (
+          /* Rejection form — reason code + justification are mandatory (closed loop) */
+          <div className="space-y-2.5 border border-red-900/40 rounded-lg p-3 bg-red-950/10">
+            <div className="text-xs font-semibold text-red-300 flex items-center gap-1.5"><XCircle size={12}/>Reject &amp; Reclassify</div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="text-[10px] text-slate-500 mb-1">Corrected tier *</div>
+                <select className="input w-full py-1 text-xs" value={overrideTier} onChange={e => setOverrideTier(e.target.value)}>
+                  {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <div className="text-[10px] text-slate-500 mb-1">Reason code *</div>
+                <select className="input w-full py-1 text-xs" value={reasonCode} onChange={e => setReasonCode(e.target.value)}>
+                  <option value="">— select —</option>
+                  {REASON_CODES.map(r => <option key={r.code} value={r.code}>{r.label}</option>)}
+                </select>
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500 mb-1">Justification * <span className="text-slate-600">(audited; feeds classifier improvement)</span></div>
+              <textarea className="input w-full text-xs h-14 resize-none" placeholder="Why is the AI classification wrong? Be specific."
+                value={justification} onChange={e => setJustification(e.target.value)}/>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => onReject(item.id, { override_tier: overrideTier, reason_code: reasonCode, justification })}
+                disabled={processing || !reasonCode || !justification.trim()}
+                className="btn-danger flex-1 justify-center text-xs disabled:opacity-40">
+                <XCircle size={13}/>Confirm — Reclassify to {overrideTier}
+              </button>
+              <button onClick={() => { setRejecting(false); setReasonCode(''); setJustification(''); }} className="btn-secondary text-xs px-3">Cancel</button>
+            </div>
+            {(!reasonCode || !justification.trim()) && (
+              <div className="text-[10px] text-slate-500">A reason code and justification are required to reject.</div>
+            )}
+          </div>
+        )}
+        {isGated && !rejecting && <div className="text-[10px] text-red-400/70 text-center">GATED zone — cannot auto-approve. Escalate to legal team.</div>}
       </div>
     </div>
   );
@@ -121,11 +165,14 @@ export default function ApprovalQueue() {
   const [processing, setProcessing] = useState(false);
   const [resolved, setResolved] = useState([]);
 
+  const [accuracy, setAccuracy] = useState(null);
+
   const load = async () => {
     setLoading(true);
     const d = await fetch(`${API}/queue`).then(r => r.json());
     setQueue(d.queue || []);
     setLoading(false);
+    fetch(`${API}/validation/accuracy`).then(r => r.json()).then(setAccuracy).catch(() => {});
   };
 
   useEffect(() => { load(); }, []);
@@ -138,10 +185,12 @@ export default function ApprovalQueue() {
     setProcessing(false);
   };
 
-  const handleReject = async (id, overrideTier) => {
+  const handleReject = async (id, payload) => {
     setProcessing(true);
-    await fetch(`${API}/queue/${id}/reject`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ approver:'steward@company.com', override_tier:overrideTier }) });
-    setResolved(p => [...p, { id, action:'REJECTED', override_tier:overrideTier }]);
+    const body = { approver:'steward@company.com', ...payload };
+    const r = await fetch(`${API}/queue/${id}/reject`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    if (!r.ok) { const e = await r.json().catch(()=>({})); alert(e.error || 'Rejection failed'); setProcessing(false); return; }
+    setResolved(p => [...p, { id, action:'REJECTED', override_tier:payload.override_tier }]);
     setQueue(q => q.filter(i => i.id !== id));
     setProcessing(false);
   };
@@ -174,6 +223,48 @@ export default function ApprovalQueue() {
           </div>
         ))}
       </div>
+
+      {/* Classifier accuracy — measured against steward-confirmed ground truth */}
+      {accuracy && accuracy.total_labeled > 0 && (
+        <div className="border border-slate-800 rounded-lg p-4 bg-slate-900/40">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-semibold text-slate-200 flex items-center gap-2"><ClipboardCheck size={14} className="text-slate-500"/>Classifier Accuracy</div>
+            <div className="text-[10px] text-slate-500">measured on {accuracy.total_labeled} steward-reviewed asset{accuracy.total_labeled===1?'':'s'}</div>
+          </div>
+          <div className="grid grid-cols-3 gap-3 mb-3">
+            <div className="text-center">
+              <div className="text-2xl font-light text-slate-100">{accuracy.accuracy != null ? Math.round(accuracy.accuracy*100)+'%' : '—'}</div>
+              <div className="text-[10px] text-slate-600 mt-0.5">Overall accuracy</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-light text-slate-100">{accuracy.macro_f1 != null ? accuracy.macro_f1 : '—'}</div>
+              <div className="text-[10px] text-slate-600 mt-0.5">Macro F1</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-light text-slate-100">{accuracy.correct}/{accuracy.total_labeled}</div>
+              <div className="text-[10px] text-slate-600 mt-0.5">Correct predictions</div>
+            </div>
+          </div>
+          {accuracy.per_tier?.length > 0 && (
+            <table className="w-full text-[11px]">
+              <thead><tr className="text-slate-600 text-left">
+                <th className="font-medium py-1">Tier</th><th className="font-medium">Precision</th><th className="font-medium">Recall</th><th className="font-medium">F1</th><th className="font-medium">Support</th>
+              </tr></thead>
+              <tbody>
+                {accuracy.per_tier.map(t => (
+                  <tr key={t.tier} className="border-t border-slate-800/40">
+                    <td className="py-1 font-mono text-slate-300">{t.tier}</td>
+                    <td className="text-slate-400">{t.precision != null ? t.precision : '—'}</td>
+                    <td className="text-slate-400">{t.recall != null ? t.recall : '—'}</td>
+                    <td className="text-slate-400">{t.f1 != null ? t.f1 : '—'}</td>
+                    <td className="text-slate-500">{t.support}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
 
       {/* Resolved notifications */}
       {resolved.length > 0 && (

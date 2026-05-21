@@ -34,6 +34,7 @@ const PARSERS = {
   EXCEL: { name:'SheetJS (xlsx)', stages:['sheet_enum','hidden_sheet_detect','formula_extract','named_range_scan','ner_pipeline','content_hash','mdos_normalize'], baseMs:200 },
   AUDIO_RECORDING: { name:'music-metadata + Node.js', stages:['audio_metadata_read','format_detect','duration_extract','content_hash','mdos_normalize'], baseMs:100 },
   VIDEO_RECORDING: { name:'ffprobe + Node.js', stages:['video_metadata_probe','format_detect','duration_extract','content_hash','mdos_normalize'], baseMs:150 },
+  IMAGE: { name:'Claude Vision + Node.js', stages:['image_metadata_read','vision_ocr','vision_describe','ner_pipeline','content_hash','mdos_normalize'], baseMs:200 },
 };
 
 // ── Real PDF Parsing ─────────────────────────────────────────────────────────
@@ -762,6 +763,83 @@ function computeHash(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex').substring(0, 16);
 }
 
+// ── Real Image Parsing (Claude Vision OCR + description) ──────────────────────
+// Extracts dimensions from the file header, then uses Claude Vision to OCR any
+// text and produce a short content description. Falls back gracefully when the
+// API key is absent — metadata still captured so the asset is catalogued.
+function readImageDimensions(buffer, format) {
+  try {
+    if (format === 'PNG' && buffer.length >= 24) {
+      // PNG: width/height are big-endian uint32 at offset 16 / 20
+      return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+    }
+    if (format === 'JPEG') {
+      // Walk JPEG markers to find SOF0/2 frame header
+      let off = 2;
+      while (off < buffer.length) {
+        if (buffer[off] !== 0xFF) { off++; continue; }
+        const marker = buffer[off + 1];
+        if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {
+          return { height: buffer.readUInt16BE(off + 5), width: buffer.readUInt16BE(off + 7) };
+        }
+        off += 2 + buffer.readUInt16BE(off + 2);
+      }
+    }
+    if (format === 'GIF' && buffer.length >= 10) {
+      return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+    }
+  } catch (_) {}
+  return { width: null, height: null };
+}
+
+async function parseImageReal(buffer, fileName, format) {
+  const ext = (fileName.split('.').pop() || '').toLowerCase();
+  const mimeMap = { png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', gif:'image/gif', webp:'image/webp', bmp:'image/bmp', tiff:'image/tiff', tif:'image/tiff' };
+  const mime = mimeMap[ext] || 'image/png';
+  const dims = readImageDimensions(buffer, format);
+
+  const meta = {
+    real: true,
+    image_format: format,
+    mime_type: mime,
+    width_px: dims.width,
+    height_px: dims.height,
+    dimensions: dims.width && dims.height ? `${dims.width}×${dims.height}` : null,
+    file_size_kb: Math.round(buffer.length / 1024),
+    ocr_text: '',
+    ocr_text_length: 0,
+    description: '',
+    has_text: false,
+    vision_used: false,
+  };
+
+  // Claude Vision — OCR + description (only when API key present and image is small enough)
+  try {
+    const { ocrWithVision, describeImageWithVision } = require('./claudeService');
+    if (process.env.ANTHROPIC_API_KEY && buffer.length < 5 * 1024 * 1024) {
+      const b64 = buffer.toString('base64');
+      const ocr = await ocrWithVision(b64, mime);
+      if (ocr.text) {
+        meta.ocr_text = ocr.text.slice(0, 4000);
+        meta.ocr_text_length = ocr.text.length;
+        meta.has_text = ocr.text.trim().length > 0;
+        meta.vision_used = true;
+      }
+      if (typeof describeImageWithVision === 'function') {
+        const desc = await describeImageWithVision(b64, mime);
+        if (desc.description) { meta.description = desc.description; meta.vision_used = true; }
+      }
+    }
+  } catch (_) { /* graceful — metadata still captured */ }
+
+  // Extract entities from any OCR'd text for cross-asset relationships
+  if (meta.ocr_text) {
+    meta.entities = extractEntities(meta.ocr_text);
+    meta.text_content = meta.ocr_text;
+  }
+  return meta;
+}
+
 // ── Main parseAsset — tries real parsing, falls back to estimation ────────────
 async function parseAsset(domain, format, fileName, fileSizeMb, fileBuffer, filePath) {
   const parser = PARSERS[format] || PARSERS[domain];
@@ -787,6 +865,8 @@ async function parseAsset(domain, format, fileName, fileSizeMb, fileBuffer, file
         realMeta = parseVideoReal(filePath);
       } else if (domain === 'ELECTRONIC_CIRCUIT' && fileBuffer) {
         realMeta = parseEdaReal(fileBuffer, fileName, format);
+      } else if (domain === 'IMAGE' && fileBuffer) {
+        realMeta = await parseImageReal(fileBuffer, fileName, format);
       }
     } catch (_) { /* Fall through to estimation */ }
   }
@@ -836,6 +916,9 @@ function buildStageDetail(stage, fileName, sizeMb, realMeta, isReal) {
       format_detect: () => realMeta.format ? `Format: ${realMeta.format}. ${realMeta.bitrate || ''}` : (realMeta.video_codec ? `Video: ${realMeta.video_codec}, Audio: ${realMeta.audio_codec}.` : null),
       duration_extract: () => realMeta.duration_seconds != null ? `Duration: ${realMeta.duration_seconds} seconds.` : null,
       video_metadata_probe: () => realMeta.resolution ? `Resolution: ${realMeta.resolution}, ${realMeta.frame_rate} fps. Format: ${realMeta.format_name}.` : null,
+      image_metadata_read: () => realMeta.image_format ? `${realMeta.image_format}${realMeta.dimensions ? `, ${realMeta.dimensions}px` : ''}, ${realMeta.file_size_kb}KB.` : null,
+      vision_ocr: () => realMeta.vision_used != null ? (realMeta.has_text ? `Claude Vision OCR extracted ${realMeta.ocr_text_length} chars of text.` : (realMeta.vision_used ? 'Claude Vision: no readable text in image.' : 'Vision OCR skipped (no API key).')) : null,
+      vision_describe: () => realMeta.description ? `Vision description: ${realMeta.description.slice(0, 120)}${realMeta.description.length > 120 ? '…' : ''}` : null,
       ner_pipeline: () => {
         const e = realMeta.entities;
         if (!e) return null;
@@ -918,7 +1001,8 @@ function extractDomainMetadataEstimated(domain, format, sizeMb) {
 
 function detectFormat(filename) {
   const ext = filename.split('.').pop().toLowerCase();
-  const map = { gds:'GDSII', gdsii:'GDSII', gds2:'GDSII', oas:'OASIS', oa:'OPENACCESS', v:'VERILOG', sv:'SYSTEMVERILOG', spi:'SPICE', cir:'SPICE', sp:'SPICE', cdl:'CDL', sdc:'SDC', upf:'UPF', kicad_sch:'KICAD', kicad_pcb:'KICAD', lef:'LEF_DEF', def:'LEF_DEF', gbr:'GERBER', ger:'GERBER', dxf:'DXF', dwg:'DWG', pdf:'PDF', docx:'WORD', doc:'WORD', xlsx:'EXCEL', xls:'EXCEL', pptx:'POWERPOINT', ppt:'POWERPOINT', csv:'EXCEL', mp3:'AUDIO_RECORDING', m4a:'AUDIO_RECORDING', wav:'AUDIO_RECORDING', ogg:'AUDIO_RECORDING', flac:'AUDIO_RECORDING', mp4:'VIDEO_RECORDING', webm:'VIDEO_RECORDING', mov:'VIDEO_RECORDING', avi:'VIDEO_RECORDING', mkv:'VIDEO_RECORDING' };
+  const map = { gds:'GDSII', gdsii:'GDSII', gds2:'GDSII', oas:'OASIS', oa:'OPENACCESS', v:'VERILOG', sv:'SYSTEMVERILOG', spi:'SPICE', cir:'SPICE', sp:'SPICE', cdl:'CDL', sdc:'SDC', upf:'UPF', kicad_sch:'KICAD', kicad_pcb:'KICAD', lef:'LEF_DEF', def:'LEF_DEF', gbr:'GERBER', ger:'GERBER', dxf:'DXF', dwg:'DWG', pdf:'PDF', docx:'WORD', doc:'WORD', xlsx:'EXCEL', xls:'EXCEL', pptx:'POWERPOINT', ppt:'POWERPOINT', csv:'EXCEL', mp3:'AUDIO_RECORDING', m4a:'AUDIO_RECORDING', wav:'AUDIO_RECORDING', ogg:'AUDIO_RECORDING', flac:'AUDIO_RECORDING', mp4:'VIDEO_RECORDING', webm:'VIDEO_RECORDING', mov:'VIDEO_RECORDING', avi:'VIDEO_RECORDING', mkv:'VIDEO_RECORDING',
+    png:'PNG', jpg:'JPEG', jpeg:'JPEG', gif:'GIF', webp:'WEBP', bmp:'BMP', tiff:'TIFF', tif:'TIFF', svg:'SVG', heic:'HEIC' };
   return map[ext] || 'UNKNOWN';
 }
 
@@ -929,7 +1013,11 @@ function detectDomain(format) {
   if (['WORD','EXCEL','POWERPOINT'].includes(format)) return 'OFFICE_DOCUMENT';
   if (format === 'AUDIO_RECORDING') return 'AUDIO';
   if (format === 'VIDEO_RECORDING') return 'VIDEO';
+  if (['PNG','JPEG','GIF','WEBP','BMP','TIFF','SVG','HEIC'].includes(format)) return 'IMAGE';
   return 'UNKNOWN';
 }
+
+// All formats that map to the IMAGE domain (used by PARSERS lookup)
+['PNG','JPEG','GIF','WEBP','BMP','TIFF','SVG','HEIC'].forEach(f => { PARSERS[f] = PARSERS.IMAGE; });
 
 module.exports = { parseAsset, detectFormat, detectDomain };

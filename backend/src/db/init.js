@@ -44,6 +44,9 @@ async function initDatabase() {
     // Column-level lineage
     const migration007 = path.join(__dirname, 'migrations', '007_column_lineage.sql');
     try { await runMigration(migration007); } catch (e) { console.log('⚠️  007 migration warning:', e.message); }
+    // Classification feedback + ground truth + IMAGE domain
+    const migration008 = path.join(__dirname, 'migrations', '008_classification_feedback.sql');
+    try { await runMigration(migration008); } catch (e) { console.log('⚠️  008 migration warning:', e.message); }
     console.log('✅  Migrations complete.');
   } catch (e) {
     console.error('⚠️  Migration warning:', e.message);

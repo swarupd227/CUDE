@@ -7,6 +7,7 @@ export const DOMAIN_META = {
   AUDIO:              { label:'Audio',              icon:'🎙️', color:'bg-green-900/50 text-green-300 border-green-700/40', dot:'bg-green-400' },
   VIDEO:              { label:'Video',              icon:'🎬', color:'bg-teal-900/50 text-teal-300 border-teal-700/40', dot:'bg-teal-400' },
   STRUCTURED_DATA:    { label:'Database Table',     icon:'🗃️', color:'bg-orange-900/50 text-orange-300 border-orange-700/40', dot:'bg-orange-400' },
+  IMAGE:              { label:'Image',              icon:'🖼️', color:'bg-cyan-900/50 text-cyan-300 border-cyan-700/40', dot:'bg-cyan-400' },
 };
 
 export const CLASS_META = {

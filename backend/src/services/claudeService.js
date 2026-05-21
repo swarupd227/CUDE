@@ -346,6 +346,28 @@ async function ocrWithVision(imageBase64, mimeType = 'image/png') {
   }
 }
 
+// ── Image description via Claude Vision ───────────────────────────────────────
+// Produces a concise content description of an image (diagram, chart, photo,
+// screenshot) for cataloguing + classification. Complements ocrWithVision.
+async function describeImageWithVision(imageBase64, mimeType = 'image/png') {
+  if (!process.env.ANTHROPIC_API_KEY) return { description: '', error: 'ANTHROPIC_API_KEY not set' };
+  try {
+    const resp = await client.messages.create({
+      model: 'claude-sonnet-4-20250514', max_tokens: 400,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
+          { type: 'text', text: 'Describe this image in 1-3 sentences for a data catalog. State what it depicts (e.g. schematic, chart, screenshot, photo, diagram, scanned document) and any sensitive content (PII, credentials, proprietary designs). Be concise.' }
+        ]
+      }]
+    });
+    return { description: resp.content[0]?.text || '', success: true };
+  } catch (e) {
+    return { description: '', error: e.message };
+  }
+}
+
 // ── ASR via OpenAI Whisper API ────────────────────────────────────────────────
 // Sends audio buffer to OpenAI's Whisper API for real transcription.
 // Requires OPENAI_API_KEY env var. Max 25MB file size.
@@ -695,4 +717,4 @@ function generateMockSql(question, database) {
   return { sql, explanation, tables_used, mock: true };
 }
 
-module.exports = { agentReason, arbitrate, investigate, generateReport, monitorAlerts, ocrWithVision, transcribeWithWhisper, nlqSearch, analyzeContent, nlqToSql };
+module.exports = { agentReason, arbitrate, investigate, generateReport, monitorAlerts, ocrWithVision, describeImageWithVision, transcribeWithWhisper, nlqSearch, analyzeContent, nlqToSql };

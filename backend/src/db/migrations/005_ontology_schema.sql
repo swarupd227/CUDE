@@ -42,7 +42,8 @@ INSERT INTO ontology_domains (domain_code, label, description, color, initials, 
   ('OFFICE_DOCUMENT', 'Office Document', 'Word, Excel, PowerPoint — presentations, spreadsheets, memos', '#3b82f6', 'O', '📊', 30),
   ('AUDIO', 'Audio Recording', 'Meeting recordings, voice memos, podcast episodes', '#10b981', 'A', '🎙️', 40),
   ('VIDEO', 'Video Content', 'Video recordings, screen captures, training materials', '#14b8a6', 'V', '🎬', 50),
-  ('STRUCTURED_DATA', 'Database Table', 'SQL database tables, views — structured data from relational databases', '#f97316', 'D', '🗃️', 55)
+  ('STRUCTURED_DATA', 'Database Table', 'SQL database tables, views — structured data from relational databases', '#f97316', 'D', '🗃️', 55),
+  ('IMAGE', 'Image', 'Images, scans, diagrams, screenshots — text extracted via Claude Vision OCR', '#0891b2', 'I', '🖼️', 56)
 ON CONFLICT (domain_code) DO NOTHING;
 
 -- Seed with current hardcoded relationship types
